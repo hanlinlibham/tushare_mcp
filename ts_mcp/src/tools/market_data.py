@@ -1,0 +1,506 @@
+"""行情数据工具
+
+提供股票市场数据相关的MCP工具，包括：
+- get_stock_data: 获取综合股票数据
+- get_latest_daily_close: 获取最新日收盘数据
+- get_historical_data: 获取历史数据
+- get_moneyflow: 获取资金流向
+"""
+
+import asyncio
+from typing import Dict, Any, Optional
+from datetime import datetime, timedelta
+from fastmcp import FastMCP
+
+from ..cache import cache
+from ..utils.tushare_api import TushareAPI, fetch_daily_data
+from ..utils.large_data_handler import handle_large_data
+from .constants import READONLY_ANNOTATIONS
+
+
+def register_market_tools(mcp: FastMCP, api: TushareAPI):
+    """注册行情数据工具"""
+
+    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS)
+    async def get_stock_data(
+        ts_code: str,
+        stock_code: Optional[str] = None  # 兼容旧参数名，已废弃
+    ) -> Dict[str, Any]:
+        """获取股票综合数据（行情+财务+基础信息，支持A股/港股/美股）
+
+        Args:
+            ts_code: 股票代码，支持 '600519.SH'、'00700.HK'、'AAPL' 或裸码
+            stock_code: (废弃) 旧参数名，请使用 ts_code
+        """
+        try:
+            # 兼容旧参数名
+            if stock_code and not ts_code:
+                ts_code = stock_code
+            # 标准化股票代码
+            ts_code = api.normalize_stock_code(ts_code)
+
+            comprehensive_data = {
+                "ts_code": ts_code,
+                "input_code": ts_code,
+                "collection_time": datetime.now().isoformat(),
+                "data_source": "tushare_pro" if api.is_available() else "tushare_free",
+                "api_status": "pro" if api.is_available() else "free"
+            }
+
+            market = api.get_market(ts_code)
+
+            # 1. 实时行情数据（通过 fetch_daily_data 路由）
+            try:
+                if api.is_available():
+                    df = await fetch_daily_data(cache, api, ts_code, cache_type="realtime", limit=1)
+                    if not df.empty:
+                        latest = df.iloc[0].to_dict()
+                        comprehensive_data["realtime_data"] = {
+                            "price": latest.get('close'),
+                            "change": latest.get('change'),
+                            "pct_chg": latest.get('pct_chg'),
+                            "changepercent": latest.get('pct_chg'),
+                            "open": latest.get('open'),
+                            "high": latest.get('high'),
+                            "low": latest.get('low'),
+                            "pre_close": latest.get('pre_close'),
+                            "volume": latest.get('vol'),
+                            "amount": latest.get('amount'),
+                            "trade_date": latest.get('trade_date')
+                        }
+                    else:
+                        comprehensive_data["realtime_data"] = {"error": "无最新数据"}
+                else:
+                    comprehensive_data["realtime_data"] = {"error": "Tushare Pro not available"}
+            except Exception as e:
+                comprehensive_data["realtime_data"] = {"error": f"获取实时数据失败: {str(e)}"}
+
+            # 短暂延迟，避免API限制
+            await asyncio.sleep(0.2)
+
+            # 2. 历史行情数据（60天，通过 fetch_daily_data 路由）
+            try:
+                if api.is_available():
+                    end_date = datetime.now().strftime('%Y%m%d')
+                    start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
+
+                    df = await fetch_daily_data(
+                        cache, api, ts_code,
+                        cache_type="daily",
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    
+                    if not df.empty:
+                        df = df.sort_values('trade_date')
+                        comprehensive_data["daily_data"] = {
+                            "data_count": len(df),
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "price_statistics": {
+                                "max_price": float(df['high'].max()),
+                                "min_price": float(df['low'].min()),
+                                "avg_price": float(df['close'].mean()),
+                                "price_volatility": float(df['pct_chg'].std()) if len(df) > 1 else 0,
+                                "max_single_day_gain": float(df['pct_chg'].max()),
+                                "max_single_day_loss": float(df['pct_chg'].min())
+                            },
+                            "trend_statistics": {
+                                "total_change": float(((df['close'].iloc[-1] / df['close'].iloc[0]) - 1) * 100) if len(df) > 0 else 0
+                            }
+                        }
+                    else:
+                        comprehensive_data["daily_data"] = {"error": "无历史数据"}
+                else:
+                    comprehensive_data["daily_data"] = {"error": "Tushare Pro not available"}
+            except Exception as e:
+                comprehensive_data["daily_data"] = {"error": f"获取历史数据失败: {str(e)}"}
+
+            # 短暂延迟
+            await asyncio.sleep(0.2)
+
+            # 3. 基本信息（如果实时数据获取失败）
+            if not comprehensive_data.get("realtime_data") or comprehensive_data["realtime_data"].get("error"):
+                try:
+                    if api.is_available():
+                        if market == "HK":
+                            df = await cache.cached_call(
+                                api.pro.hk_basic,
+                                cache_type="basic",
+                                ts_code=ts_code,
+                                fields='ts_code,name,enname,market,list_status,list_date,delist_date'
+                            )
+                        elif market == "US":
+                            df = await cache.cached_call(
+                                api.pro.us_basic,
+                                cache_type="basic",
+                                ts_code=ts_code,
+                                fields='ts_code,name,enname,classify,list_date,delist_date'
+                            )
+                        else:
+                            df = await cache.cached_call(
+                                api.pro.stock_basic,
+                                cache_type="basic",
+                                ts_code=ts_code,
+                                fields='ts_code,symbol,name,area,industry,fullname,enname,market,exchange,curr_type,list_status,list_date,delist_date,is_hs'
+                            )
+
+                        if not df.empty:
+                            basic_info = df.iloc[0].to_dict()
+                            comprehensive_data["basic_info"] = basic_info
+                        else:
+                            comprehensive_data["basic_info"] = {"error": "未找到股票基本信息"}
+                    else:
+                        comprehensive_data["basic_info"] = {"error": "Tushare Pro not available"}
+                except Exception as e:
+                    comprehensive_data["basic_info"] = {"error": f"获取基本信息失败: {str(e)}"}
+            else:
+                comprehensive_data["basic_info"] = {"source": "realtime_data"}
+
+            # 短暂延迟
+            await asyncio.sleep(0.2)
+
+            # 4. 财务数据（仅 A 股支持）
+            if market != "A":
+                comprehensive_data["financial_data"] = {
+                    "note": f"财务数据仅支持A股，当前代码 {ts_code} 为{'港股' if market == 'HK' else '美股'}"
+                }
+            else:
+                try:
+                    if api.is_available():
+                        financial_data = {}
+
+                        # 获取利润表核心数据
+                        income_df = await cache.cached_call(
+                            api.pro.income,
+                            cache_type="financial",
+                            ts_code=ts_code,
+                            limit=1,
+                            fields='ts_code,end_date,total_revenue,total_profit,n_income'
+                        )
+
+                        if not income_df.empty:
+                            latest_income = income_df.iloc[0].to_dict()
+                            financial_data["income_core"] = {
+                                "total_revenue": latest_income.get('total_revenue', 0),
+                                "total_profit": latest_income.get('total_profit', 0),
+                                "net_income": latest_income.get('n_income', 0),
+                                "end_date": latest_income.get('end_date', '')
+                            }
+
+                        # 获取资产负债表核心数据
+                        balance_df = await cache.cached_call(
+                            api.pro.balancesheet,
+                            cache_type="financial",
+                            ts_code=ts_code,
+                            limit=1,
+                            fields='ts_code,end_date,total_assets,total_hldr_eqy_exc_min_int'
+                        )
+
+                        if not balance_df.empty:
+                            latest_balance = balance_df.iloc[0].to_dict()
+                            financial_data["balance_core"] = {
+                                "total_assets": latest_balance.get('total_assets', 0),
+                                "total_equity": latest_balance.get('total_hldr_eqy_exc_min_int', 0),
+                                "end_date": latest_balance.get('end_date', '')
+                            }
+
+                        comprehensive_data["financial_data"] = financial_data
+                    else:
+                        comprehensive_data["financial_data"] = {"error": "Tushare Pro not available"}
+                except Exception as e:
+                    comprehensive_data["financial_data"] = {"error": f"获取财务数据失败: {str(e)}"}
+
+            # 检查是否有任何有效数据
+            has_valid_data = any(
+                not data.get("error")
+                for data in [
+                    comprehensive_data.get("realtime_data", {}),
+                    comprehensive_data.get("daily_data", {}),
+                    comprehensive_data.get("financial_data", {})
+                ]
+            )
+
+            if has_valid_data:
+                return {
+                    "success": True,
+                    "ts_code": ts_code,
+                    "data": comprehensive_data,
+                    "timestamp": datetime.now().isoformat()
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "无法获取任何有效数据",
+                    "ts_code": ts_code,
+                    "data": comprehensive_data
+                }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"获取股票综合数据异常: {str(e)}",
+                "ts_code": ts_code if 'ts_code' in locals() else None
+            }
+
+    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS)
+    async def get_latest_daily_close(
+        ts_code: str,
+        stock_code: Optional[str] = None  # 兼容旧参数名，已废弃
+    ) -> Dict[str, Any]:
+        """获取股票/指数最新收盘价（日线数据，支持A股/港股/美股/指数）
+
+        Args:
+            ts_code: 股票或指数代码，支持 '600519.SH'、'00700.HK'、'AAPL'、'000001.SH'(上证指数) 等
+            stock_code: (废弃) 旧参数名，请使用 ts_code
+        """
+        try:
+            # 兼容旧参数名
+            if stock_code and not ts_code:
+                ts_code = stock_code
+            ts_code = api.normalize_stock_code(ts_code)
+
+            if api.is_available():
+                df = await fetch_daily_data(cache, api, ts_code, cache_type="realtime", limit=1)
+                if df is not None and not df.empty:
+                    latest = df.iloc[0].to_dict()
+                    data = {
+                        "price": latest.get('close'),
+                        "change": latest.get('change'),
+                        "pct_chg": latest.get('pct_chg'),
+                        "open": latest.get('open'),
+                        "high": latest.get('high'),
+                        "low": latest.get('low'),
+                        "pre_close": latest.get('pre_close'),
+                        "volume": latest.get('vol'),
+                        "amount": latest.get('amount'),
+                        "trade_date": latest.get('trade_date')
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": "无最新数据",
+                        "ts_code": ts_code
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": "Tushare Pro not available",
+                    "ts_code": ts_code
+                }
+
+            # 计算 asset_type
+            _market = api.get_market(ts_code)
+            if _market == "HK":
+                _asset_type = "hk"
+            elif _market == "US":
+                _asset_type = "us"
+            elif api.is_fund_code(ts_code):
+                _asset_type = "fund"
+            elif api.is_index_code(ts_code):
+                _asset_type = "index"
+            else:
+                _asset_type = "stock"
+
+            return {
+                "success": True,
+                "ts_code": ts_code,
+                "asset_type": _asset_type,
+                "data": data,
+                # 向后兼容：保留旧字段名
+                "realtime_data": data,
+                "meta": {
+                    "data_source": "tushare_pro",
+                    "data_type": "daily_close",
+                    "note": "此为日线收盘数据，非盘中实时行情"
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"获取数据异常: {str(e)}",
+                "ts_code": ts_code if 'ts_code' in locals() else None
+            }
+
+    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS)
+    async def get_historical_data(
+        ts_code: str,
+        days: int = 60,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        include_items: bool = False,
+        max_rows: int = 30,
+        stock_code: Optional[str] = None  # 兼容旧参数名，已废弃
+    ) -> Dict[str, Any]:
+        """获取股票/指数历史数据及统计指标（波动率、区间涨跌幅、价格区间）
+
+        Args:
+            ts_code: 股票或指数代码，支持 '600519.SH'、'00700.HK'、'AAPL'、'399001.SZ' 等
+            days: 获取天数，默认60，不传 start_date/end_date 时使用
+            start_date: 开始日期(YYYYMMDD)，优先级高于 days
+            end_date: 结束日期(YYYYMMDD)，默认今天
+            include_items: 是否返回每日明细，默认 False
+            max_rows: 明细最大行数，默认30
+            stock_code: (废弃) 旧参数名，请使用 ts_code
+        """
+        try:
+            # 兼容旧参数名
+            if stock_code and not ts_code:
+                ts_code = stock_code
+            # 标准化股票代码
+            ts_code = api.normalize_stock_code(ts_code)
+
+            # 获取历史数据
+            if api.is_available():
+                # 优先级：start_date/end_date > days
+                if not end_date:
+                    end_date = datetime.now().strftime('%Y%m%d')
+                if not start_date:
+                    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+
+                df = await fetch_daily_data(
+                    cache, api, ts_code,
+                    cache_type="daily",
+                    start_date=start_date,
+                    end_date=end_date
+                )
+
+                if df is not None and not df.empty:
+                    df = df.sort_values('trade_date')
+
+                    # 计算统计指标
+                    daily_data = {
+                        "data_count": len(df),
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "price_statistics": {
+                            "max_price": float(df['high'].max()),
+                            "min_price": float(df['low'].min()),
+                            "avg_price": round(float(df['close'].mean()), 2),
+                            "latest_price": float(df['close'].iloc[-1]),
+                            "price_volatility": round(float(df['pct_chg'].std()), 4) if len(df) > 1 else 0,
+                            "max_single_day_gain": float(df['pct_chg'].max()),
+                            "max_single_day_loss": float(df['pct_chg'].min())
+                        },
+                        "trend_statistics": {
+                            "total_change": round(float(((df['close'].iloc[-1] / df['close'].iloc[0]) - 1) * 100), 2) if len(df) > 0 else 0
+                        }
+                    }
+
+                    # P1-3: 默认不返回详细列表，减少返回体大小
+                    if include_items:
+                        # 限制返回行数
+                        items_df = df.tail(max_rows) if len(df) > max_rows else df
+                        daily_data["items"] = items_df.to_dict('records')
+                        daily_data["items_truncated"] = len(df) > max_rows
+                        if len(df) > max_rows:
+                            daily_data["items_note"] = f"仅返回最近 {max_rows} 条，共 {len(df)} 条"
+                else:
+                    daily_data = {"error": "无历史数据"}
+            else:
+                daily_data = {"error": "Tushare Pro not available"}
+
+            if daily_data and not daily_data.get("error"):
+                # 计算 asset_type
+                _market = api.get_market(ts_code)
+                if _market == "HK":
+                    _asset_type = "hk"
+                elif _market == "US":
+                    _asset_type = "us"
+                elif api.is_index_code(ts_code):
+                    _asset_type = "index"
+                else:
+                    _asset_type = "stock"
+
+                return {
+                    "success": True,
+                    "ts_code": ts_code,
+                    "asset_type": _asset_type,
+                    "daily_data": daily_data,
+                    "days": days,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "timestamp": datetime.now().isoformat()
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": daily_data.get("error", "无法获取历史数据"),
+                    "ts_code": ts_code
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"获取历史数据异常: {str(e)}",
+                "ts_code": ts_code if 'ts_code' in locals() else None
+            }
+
+    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS)
+    async def get_moneyflow(
+        ts_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        stock_code: Optional[str] = None  # 兼容旧参数名，已废弃
+    ) -> Dict[str, Any]:
+        """获取个股资金流向（主力/散户净流入，仅A股）
+
+        Args:
+            ts_code: A股代码，支持 '600519.SH' 或 '600519'
+            start_date: 开始日期(YYYYMMDD)，默认最近30天
+            end_date: 结束日期(YYYYMMDD)，默认今天
+            stock_code: (废弃) 旧参数名，请使用 ts_code
+        """
+        try:
+            # 兼容旧参数名
+            if stock_code and not ts_code:
+                ts_code = stock_code
+            ts_code = api.normalize_stock_code(ts_code)
+
+            # 资金流向仅支持 A 股
+            _market = api.get_market(ts_code)
+            if _market != "A":
+                return {
+                    "success": False,
+                    "error": f"资金流向仅支持A股，当前代码 {ts_code} 为{'港股' if _market == 'HK' else '美股'}"
+                }
+
+            if not api.is_available():
+                return {"success": False, "error": "Tushare Pro not available"}
+
+            # 默认获取最近30天
+            if not end_date:
+                end_date = datetime.now().strftime('%Y%m%d')
+            if not start_date:
+                start_date = (datetime.now() - timedelta(days=30)).strftime('%Y%m%d')
+
+            df = api.pro.moneyflow(ts_code=ts_code, start_date=start_date, end_date=end_date)
+
+            if df.empty:
+                return {"success": False, "error": "未找到资金流向数据", "ts_code": ts_code}
+
+            # 按日期排序
+            df = df.sort_values('trade_date')
+            data = df.to_dict('records')
+
+            result = {
+                "success": True,
+                "ts_code": ts_code,
+                "start_date": start_date,
+                "end_date": end_date,
+                "count": len(data),
+                "timestamp": datetime.now().isoformat()
+            }
+            large = handle_large_data(data, "get_moneyflow", {"ts_code": ts_code, "start_date": start_date, "end_date": end_date})
+            if "is_truncated" in large:
+                result.update(large)
+            else:
+                result["data"] = large["data"]
+            return result
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"获取资金流向数据异常: {str(e)}",
+                "ts_code": ts_code if 'ts_code' in locals() else None
+            }

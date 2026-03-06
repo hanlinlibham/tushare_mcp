@@ -1,0 +1,196 @@
+"""
+MCP 服务器主入口（模块化版本）
+
+这是新的主入口文件，展示重构后的架构。
+当前状态：部分工具已模块化，其余工具仍使用原 tushare_server.py
+"""
+
+import logging
+import sys
+import os
+from pathlib import Path
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+
+# ✅ 加载 .env 文件中的环境变量
+try:
+    from dotenv import load_dotenv
+    # 加载项目根目录下的 .env 文件
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    # 如果没有安装 python-dotenv，从系统环境变量读取
+    pass
+
+# 添加父目录到 Python 路径
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from fastmcp import FastMCP
+from fastmcp.server.transforms.visibility import Visibility
+import uvicorn
+
+from src.config import config
+from src.cache import cache
+from src.database import EntityDatabase
+from src.utils.tushare_api import TushareAPI
+
+# 导入工具注册函数
+from src.tools.market_data import register_market_tools
+from src.tools.financial_data import register_financial_tools
+from src.tools.performance_data import register_performance_tools
+from src.tools.market_flow import register_market_flow_tools
+from src.tools.search import register_search_tools
+from src.tools.analysis import register_analysis_tools
+from src.tools.sector import register_sector_tools
+# P0-1: 市场统计工具
+from src.tools.market_statistics import register_market_statistics_tools
+# P1-5: 工具元数据
+from src.tools.meta import register_meta_tools
+# 宏观经济数据工具
+from src.tools.macro_data import register_macro_tools
+# 指数数据工具
+from src.tools.index_data import register_index_tools
+# 基金数据工具
+from src.tools.fund_data import register_fund_tools
+
+# 导入 Resources 和 Prompts 注册函数
+from src.resources.entity_stats import register_entity_resources
+from src.resources.stock_data import register_stock_data_resources
+from src.prompts.stock_analysis import register_stock_prompts
+from src.routes.data_download import register_data_routes
+from src.cache.data_file_store import data_file_store
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+def create_mcp_server() -> FastMCP:
+    """
+    创建 MCP 服务器实例（模块化版本）
+    
+    Returns:
+        FastMCP 实例
+    """
+    
+    # 验证配置
+    config.validate()
+    
+    # 定义 lifespan：启动时开启数据文件清理循环
+    @asynccontextmanager
+    async def server_lifespan(app: FastMCP) -> AsyncIterator[None]:
+        await data_file_store.start_cleanup_loop()
+        logger.info("DataFileStore cleanup loop started")
+        yield
+
+    # 创建 MCP 实例
+    mcp = FastMCP(
+        name="tushare-data",
+        instructions=(
+            "专业A股金融数据服务。工具按分类组织：市场统计、行情数据、行业板块、量化分析、财务数据、搜索、宏观数据、指数数据。\n"
+            "启动时只显示核心工具。调用 focus_category(分类名) 解锁某分类全部工具，调用 show_all_tools() 查看全部。"
+            "调用 get_tool_manifest 查看完整工具清单。"
+        ),
+        lifespan=server_lifespan,
+    )
+    
+    # 初始化组件
+    api = TushareAPI(config.TUSHARE_TOKEN)
+    db = EntityDatabase(config.BACKEND_API_URL)
+    
+    logger.info(f"✅ Initialized components:")
+    logger.info(f"   - TushareAPI: {api}")
+    logger.info(f"   - Cache: {cache}")
+    logger.info(f"   - Database: {db}")
+    
+    # 注册工具（模块化）
+    logger.info("📦 Registering tools...")
+
+    # 注册所有工具
+    register_market_tools(mcp, api)
+    register_financial_tools(mcp, api)
+    register_performance_tools(mcp, api)
+    register_market_flow_tools(mcp, api)
+    register_search_tools(mcp, api, db)
+    register_analysis_tools(mcp, api)
+    register_sector_tools(mcp, api)
+    # P0-1: 市场统计工具（3个新工具）
+    register_market_statistics_tools(mcp, api)
+    # P1-5: 工具元数据
+    register_meta_tools(mcp, api)
+    # 宏观经济数据工具（7个工具）
+    register_macro_tools(mcp, api)
+    # 指数数据工具（3个工具）
+    register_index_tools(mcp, api)
+    # 基金数据工具（3个工具）
+    register_fund_tools(mcp, api)
+
+    # 注册 Resources
+    register_entity_resources(mcp, db)
+    register_stock_data_resources(mcp, api)
+
+    # 注册 Prompts
+    register_stock_prompts(mcp)
+
+    # 注册数据下载路由
+    register_data_routes(mcp)
+
+    # 渐进披露：全局 Visibility Transforms
+    # 默认只显示核心入口工具 + 导航工具，其余通过 focus_category / show_all_tools 解锁
+    CORE_TOOLS = {
+        "get_latest_daily_close",   # 行情数据入口
+        "get_market_summary",       # 市场统计入口
+        "search_stocks",            # 搜索入口
+        "get_macro_summary",        # 宏观数据入口
+    }
+
+    # 1. 全局隐藏所有工具
+    mcp.add_transform(Visibility(enabled=False, match_all=True))
+    # 2. 全局显示核心入口工具
+    mcp.add_transform(Visibility(enabled=True, names=CORE_TOOLS))
+    # 3. 全局显示导航工具 (get_tool_manifest, focus_category, show_all_tools)
+    mcp.add_transform(Visibility(enabled=True, tags={"导航"}))
+
+    logger.info("✅ MCP Server initialized with progressive disclosure")
+
+    return mcp
+
+
+def main():
+    """主函数"""
+    logger.info("=" * 80)
+    logger.info("🚀 Starting Tushare MCP Server (Modular Version)")
+    logger.info("=" * 80)
+    logger.info(f"📊 Configuration:")
+    logger.info(f"   - Host: {config.HOST}")
+    logger.info(f"   - Port: {config.PORT}")
+    logger.info(f"   - Transport: {config.TRANSPORT}")
+    logger.info(f"   - Backend API: {config.BACKEND_API_URL}")
+    logger.info(f"   - Cache: {'Enabled' if config.CACHE_ENABLED else 'Disabled'}")
+    logger.info("=" * 80)
+    
+    try:
+        # 创建服务器
+        mcp = create_mcp_server()
+        
+        logger.info("🌐 Starting HTTP server...")
+        logger.info(f"   URL: http://{config.HOST}:{config.PORT}")
+        logger.info("=" * 80)
+        
+        # 启动服务器 - 使用配置的传输方式（默认 streamable-http）
+        mcp.run(transport=config.TRANSPORT, host=config.HOST, port=config.PORT)
+        
+    except KeyboardInterrupt:
+        logger.info("\n⚠️  Server interrupted by user")
+    except Exception as e:
+        logger.error(f"❌ Server failed to start: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+

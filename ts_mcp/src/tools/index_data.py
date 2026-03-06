@@ -1,0 +1,296 @@
+"""指数数据工具
+
+提供指数专属的MCP工具，包括：
+- get_index_weight: 获取指数成分股及权重
+- get_index_valuation: 获取指数估值数据（PE/PB/换手率/市值）
+- get_industry_overview: 行业分类与成分查询（申万/中信）
+"""
+
+from typing import Dict, Any, Optional
+from datetime import datetime
+from fastmcp import FastMCP
+import logging
+
+from ..cache import cache
+from ..utils.tushare_api import TushareAPI
+from ..utils.large_data_handler import handle_large_data
+from .constants import READONLY_ANNOTATIONS
+
+logger = logging.getLogger(__name__)
+
+
+def register_index_tools(mcp: FastMCP, api: TushareAPI):
+    """注册指数数据工具"""
+
+    @mcp.tool(tags={"指数数据"}, annotations=READONLY_ANNOTATIONS)
+    async def get_index_weight(
+        index_code: str,
+        trade_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """获取指数成分股及权重（按权重降序）
+
+        Args:
+            index_code: 指数代码，如 '000300.SH'(沪深300)、'000016.SH'(上证50)
+            trade_date: 交易日期(YYYYMMDD)，获取该日快照
+            start_date: 开始日期(YYYYMMDD)
+            end_date: 结束日期(YYYYMMDD)
+        """
+        try:
+            if not api.is_available():
+                return {"success": False, "error": "Tushare Pro not available"}
+
+            kwargs = {"index_code": index_code}
+            if trade_date:
+                kwargs["trade_date"] = trade_date
+            if start_date:
+                kwargs["start_date"] = start_date
+            if end_date:
+                kwargs["end_date"] = end_date
+
+            df = await cache.cached_call(
+                api.pro.index_weight,
+                cache_type="daily",
+                **kwargs
+            )
+
+            if df is None or df.empty:
+                return {
+                    "success": False,
+                    "error": f"未找到指数 {index_code} 的成分股数据",
+                    "index_code": index_code
+                }
+
+            # 按权重降序排列
+            df = df.sort_values('weight', ascending=False)
+
+            constituents = df.to_dict('records')
+
+            result = {
+                "success": True,
+                "index_code": index_code,
+                "count": len(constituents),
+                "timestamp": datetime.now().isoformat()
+            }
+            large = handle_large_data(constituents, "get_index_weight", {"index_code": index_code, "trade_date": trade_date})
+            if "is_truncated" in large:
+                result.update(large)
+            else:
+                result["constituents"] = large["data"]
+            return result
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"获取指数成分股异常: {str(e)}",
+                "index_code": index_code
+            }
+
+    @mcp.tool(tags={"指数数据"}, annotations=READONLY_ANNOTATIONS)
+    async def get_index_valuation(
+        ts_code: str,
+        trade_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """获取指数估值数据（PE/PB/换手率/市值，支持宽基和申万指数）
+
+        Args:
+            ts_code: 指数代码，如 '000300.SH'(沪深300)、'801010.SI'(申万农林牧渔)
+            trade_date: 交易日期(YYYYMMDD)
+            start_date: 开始日期(YYYYMMDD)
+            end_date: 结束日期(YYYYMMDD)
+        """
+        try:
+            if not api.is_available():
+                return {"success": False, "error": "Tushare Pro not available"}
+
+            kwargs = {"ts_code": ts_code}
+            if trade_date:
+                kwargs["trade_date"] = trade_date
+            if start_date:
+                kwargs["start_date"] = start_date
+            if end_date:
+                kwargs["end_date"] = end_date
+
+            df = None
+
+            # 申万行业指数：sw_daily 自带 pe/pb/total_mv/float_mv
+            if ts_code.upper().endswith('.SI'):
+                raw = await cache.cached_call(
+                    api.pro.sw_daily,
+                    cache_type="daily",
+                    **kwargs
+                )
+                if raw is not None and not raw.empty:
+                    # 只保留估值相关列
+                    keep_cols = ['ts_code', 'trade_date', 'pe', 'pb', 'total_mv', 'float_mv']
+                    available = [c for c in keep_cols if c in raw.columns]
+                    df = raw[available].copy()
+            else:
+                # 宽基指数：index_dailybasic
+                df = await cache.cached_call(
+                    api.pro.index_dailybasic,
+                    cache_type="daily",
+                    **kwargs
+                )
+
+            if df is None or df.empty:
+                return {
+                    "success": False,
+                    "error": f"未找到指数 {ts_code} 的估值数据",
+                    "ts_code": ts_code
+                }
+
+            df = df.sort_values('trade_date')
+            data = df.to_dict('records')
+
+            result = {
+                "success": True,
+                "ts_code": ts_code,
+                "count": len(data),
+                "timestamp": datetime.now().isoformat()
+            }
+            large = handle_large_data(data, "get_index_valuation", {"ts_code": ts_code, "trade_date": trade_date})
+            if "is_truncated" in large:
+                result.update(large)
+            else:
+                result["data"] = large["data"]
+            return result
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"获取指数估值数据异常: {str(e)}",
+                "ts_code": ts_code
+            }
+
+    @mcp.tool(tags={"指数数据"}, annotations=READONLY_ANNOTATIONS)
+    async def get_industry_overview(
+        action: str,
+        level: Optional[str] = None,
+        src: Optional[str] = None,
+        index_code: Optional[str] = None,
+        ts_code: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """行业分类与成分股查询（申万/中信）
+
+        Args:
+            action: classify(行业分类列表) / sw_members(申万成分股) / ci_members(中信成分股)
+            level: 行业级别，仅 classify 用，L1/L2/L3
+            src: 分类来源，仅 classify 用，如 "SW2021"
+            index_code: 行业指数代码，如 "801010.SI"
+            ts_code: 个股代码，查询所属行业
+        """
+        try:
+            if not api.is_available():
+                return {"success": False, "error": "Tushare Pro not available"}
+
+            if action == "classify":
+                kwargs = {}
+                if level:
+                    kwargs["level"] = level
+                if src:
+                    kwargs["src"] = src
+
+                df = await cache.cached_call(
+                    api.pro.index_classify,
+                    cache_type="basic",
+                    **kwargs
+                )
+
+                if df is None or df.empty:
+                    return {"success": False, "error": "未找到行业分类数据"}
+
+                data = df.to_dict('records')
+                return {
+                    "success": True,
+                    "action": action,
+                    "count": len(data),
+                    "data": data,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            elif action == "sw_members":
+                kwargs = {}
+                if index_code:
+                    # 申万代码层级：L1=801xxx, L2=8011xx/8012xx等(4位前缀), L3=更细分
+                    # 先匹配更具体的层级，再回退到 L1
+                    numeric = index_code.split('.')[0]
+                    if len(numeric) == 6 and numeric[:3] == '801':
+                        # 检查第4位是否为0：801xx0 通常是 L1，否则是 L2/L3
+                        if len(numeric) >= 4 and numeric[3] != '0':
+                            kwargs["l2_code"] = index_code
+                        else:
+                            kwargs["l1_code"] = index_code
+                    else:
+                        kwargs["l1_code"] = index_code
+                if ts_code:
+                    kwargs["ts_code"] = ts_code
+
+                df = await cache.cached_call(
+                    api.pro.index_member_all,
+                    cache_type="basic",
+                    **kwargs
+                )
+
+                if df is None or df.empty:
+                    return {"success": False, "error": "未找到申万行业成分数据"}
+
+                data = df.to_dict('records')
+                result = {
+                    "success": True,
+                    "action": action,
+                    "count": len(data),
+                    "timestamp": datetime.now().isoformat()
+                }
+                large = handle_large_data(data, "get_industry_overview_sw", {"index_code": index_code, "ts_code": ts_code})
+                if "is_truncated" in large:
+                    result.update(large)
+                else:
+                    result["data"] = large["data"]
+                return result
+
+            elif action == "ci_members":
+                kwargs = {}
+                if index_code:
+                    kwargs["l1_code"] = index_code
+                if ts_code:
+                    kwargs["ts_code"] = ts_code
+
+                df = await cache.cached_call(
+                    api.pro.ci_index_member,
+                    cache_type="basic",
+                    **kwargs
+                )
+
+                if df is None or df.empty:
+                    return {"success": False, "error": "未找到中信行业成分数据"}
+
+                data = df.to_dict('records')
+                result = {
+                    "success": True,
+                    "action": action,
+                    "count": len(data),
+                    "timestamp": datetime.now().isoformat()
+                }
+                large = handle_large_data(data, "get_industry_overview_ci", {"index_code": index_code, "ts_code": ts_code})
+                if "is_truncated" in large:
+                    result.update(large)
+                else:
+                    result["data"] = large["data"]
+                return result
+
+            else:
+                return {
+                    "success": False,
+                    "error": f"不支持的 action: {action}，请使用 classify/sw_members/ci_members"
+                }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"行业查询异常: {str(e)}",
+                "action": action
+            }
