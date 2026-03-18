@@ -13,9 +13,11 @@
 """
 
 import asyncio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from datetime import datetime, timedelta
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 import pandas as pd
 import logging
 
@@ -31,7 +33,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     """注册宏观数据工具"""
 
     @mcp.tool(tags={"宏观数据"}, meta={"ui": {"resourceUri": "ui://tushare/macro-panel", "visibility": ["model", "app"]}})
-    async def get_macro_summary() -> Dict[str, Any]:
+    async def get_macro_summary() -> Union[ToolResult, Dict[str, Any]]:
         """
         【宏观概览】一次调用获取最新的关键宏观经济指标
 
@@ -275,16 +277,40 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 else:
                     analysis["monetary_policy"] = "货币政策偏紧"
 
-            return {
+            # Build concise text summary for LLM (~100 tokens)
+            parts = ["宏观概览:"]
+            if result.get("gdp") and result["gdp"].get("gdp_yoy"):
+                parts.append(f"GDP {result['gdp']['gdp_yoy']}%({analysis.get('growth', '')})")
+            if result.get("cpi") and result["cpi"].get("yoy") is not None:
+                parts.append(f"CPI {result['cpi']['yoy']}%({analysis.get('inflation', '')})")
+            if result.get("pmi") and result["pmi"].get("manufacturing_pmi"):
+                interp = result["pmi"].get("interpretation", "")
+                parts.append(f"PMI {result['pmi']['manufacturing_pmi']}({interp})")
+            if result.get("money") and result["money"].get("m2_yoy"):
+                policy = analysis.get("monetary_policy", "")
+                parts.append(f"M2 {result['money']['m2_yoy']}%({policy})")
+            if result.get("lpr"):
+                lpr = result["lpr"]
+                parts.append(f"LPR {lpr.get('lpr_1y', 'N/A')}/{lpr.get('lpr_5y', 'N/A')}")
+            summary = " ".join(parts)
+
+            meta = build_meta(
+                data_source="tushare_pro",
+                coverage=sum(1 for v in result.values() if v is not None)
+            )
+
+            structured = {
                 "success": True,
                 "data": result,
                 "analysis": analysis,
-                "meta": build_meta(
-                    data_source="tushare_pro",
-                    coverage=sum(1 for v in result.values() if v is not None)
-                ),
+                "meta": meta,
                 "timestamp": datetime.now().isoformat()
             }
+
+            return ToolResult(
+                content=[TextContent(type="text", text=summary)],
+                structured_content=structured,
+            )
 
         except Exception as e:
             logger.error(f"❌ get_macro_summary error: {e}")

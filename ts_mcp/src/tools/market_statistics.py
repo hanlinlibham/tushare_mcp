@@ -8,9 +8,11 @@
 """
 
 import asyncio
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from datetime import datetime, timedelta
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 import pandas as pd
 import numpy as np
 import logging
@@ -32,7 +34,7 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
         trade_date: Optional[str] = None,
         market: str = "all",
         include_st: bool = False
-    ) -> Dict[str, Any]:
+    ) -> Union[ToolResult, Dict[str, Any]]:
         """
         【市场概况】一次调用获取A股整体涨跌/成交/涨停跌停统计
 
@@ -259,12 +261,29 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
                 market_filter=market
             )
 
-            return {
+            # Build concise text summary for LLM (~100 tokens)
+            market_label = {"all": "A股", "CYB": "创业板", "KCB": "科创板", "SH": "沪主板", "SZ": "深主板", "BJ": "北交所"}.get(market, "A股")
+            mean_sign = "+" if pct_chg_stats["mean"] >= 0 else ""
+            summary = (
+                f"{market_label}({adjusted_date}): "
+                f"上涨{advance}只({advance_decline['advance_ratio']}%), "
+                f"下跌{decline}只, "
+                f"涨停{limit_up}只, "
+                f"成交{int(amount_stats['total'])}亿. "
+                f"平均涨幅{mean_sign}{pct_chg_stats['mean']}%"
+            )
+
+            structured = {
                 "success": True,
                 "data": data,
                 "meta": meta,
                 "timestamp": datetime.now().isoformat()
             }
+
+            return ToolResult(
+                content=[TextContent(type="text", text=summary)],
+                structured_content=structured,
+            )
 
         except Exception as e:
             logger.error(f"❌ get_market_summary error: {e}")
@@ -277,7 +296,7 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
         market: str = "all",
         top_n: int = 10,
         include_st: bool = False
-    ) -> Dict[str, Any]:
+    ) -> Union[ToolResult, Dict[str, Any]]:
         """
         【涨跌排行】获取涨幅/跌幅最大的股票列表
 
@@ -440,12 +459,28 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
                 coverage=len(df_daily)
             )
 
-            return {
+            # Build concise text summary for LLM
+            top3_gain = "; ".join(
+                f"{g['name']} {'+' if g['pct_chg'] >= 0 else ''}{g['pct_chg']}%"
+                for g in top_gainers[:3]
+            )
+            top3_loss = "; ".join(
+                f"{l['name']} {l['pct_chg']}%"
+                for l in top_losers[:3]
+            )
+            summary = f"涨幅前3: {top3_gain}; 跌幅前3: {top3_loss}"
+
+            structured = {
                 "success": True,
                 "data": data,
                 "meta": meta,
                 "timestamp": datetime.now().isoformat()
             }
+
+            return ToolResult(
+                content=[TextContent(type="text", text=summary)],
+                structured_content=structured,
+            )
 
         except Exception as e:
             logger.error(f"❌ get_market_extremes error: {e}")
@@ -456,7 +491,7 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
         stock_codes: List[str],
         start_date: str,
         end_date: Optional[str] = None
-    ) -> Dict[str, Any]:
+    ) -> Union[ToolResult, Dict[str, Any]]:
         """
         【批量涨跌幅】计算多只股票的区间累计涨跌幅，并返回均值
 
@@ -665,13 +700,44 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
                 expected_coverage=len(stock_codes)
             )
 
-            return {
+            # Build concise text summary for LLM
+            mean_str = f"{'+' if statistics.get('mean', 0) >= 0 else ''}{statistics.get('mean', 'N/A')}%"
+            median_str = f"{'+' if statistics.get('median', 0) >= 0 else ''}{statistics.get('median', 'N/A')}%"
+            max_str = f"{'+' if statistics.get('max', 0) >= 0 else ''}{statistics.get('max', 'N/A')}%"
+            summary = (
+                f"{len(pct_changes)}只股票({start_date}-{adjusted_end})区间涨跌: "
+                f"均值{mean_str}, 中位数{median_str}, 最大{max_str}"
+            )
+
+            structured = {
                 "success": True,
                 "data": data,
                 "meta": meta,
                 "timestamp": datetime.now().isoformat()
             }
 
+            return ToolResult(
+                content=[TextContent(type="text", text=summary)],
+                structured_content=structured,
+            )
+
         except Exception as e:
             logger.error(f"❌ get_batch_pct_chg error: {e}")
             return build_error_response(f"批量获取涨跌幅异常: {str(e)}", ErrorCode.UPSTREAM_ERROR)
+
+    @mcp.tool(
+        tags={"市场统计"},
+        meta={"ui": {"resourceUri": "ui://tushare/market-dashboard", "visibility": ["app"]}}
+    )
+    async def refresh_market_data(
+        market: str = "all",
+        include_st: bool = False
+    ) -> Dict[str, Any]:
+        """刷新市场数据（仅 UI 调用，对 LLM 隐藏）
+
+        Args:
+            market: 市场筛选 ("all"/"CYB"/"KCB"/"SH"/"SZ"/"BJ")
+            include_st: 是否包含ST股票
+        """
+        return await get_market_summary(market=market, include_st=include_st)
+

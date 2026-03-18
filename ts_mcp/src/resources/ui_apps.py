@@ -5,6 +5,8 @@ MCP Apps UI 资源模块
 - ui://tushare/market-dashboard: 市场概况仪表板（ECharts）
 - ui://tushare/macro-panel: 宏观经济指标面板
 - ui://tushare/data-table: 通用可交互数据表格
+- ui://tushare/candlestick-chart: K线图（OHLC+成交量+均线）
+- ui://tushare/moneyflow-chart: 资金流向多线折线图
 
 参考：MCP Apps 规范 (SEP-1865)
 协议版本：2025-06-18
@@ -505,6 +507,582 @@ tr:hover td { background: var(--color-row-hover); }
 </html>"""
 
 
+CANDLESTICK_CHART_HTML = """\
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K线图</title>
+<style>
+:root {
+  --color-background-primary: light-dark(#ffffff, #1a1a1a);
+  --color-background-secondary: light-dark(#f8f9fa, #222222);
+  --color-text-primary: light-dark(#171717, #e5e5e5);
+  --color-text-secondary: light-dark(#6b7280, #9ca3af);
+  --color-border-primary: light-dark(#e5e5e5, #333333);
+  --font-sans: system-ui, -apple-system, "PingFang SC", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", monospace;
+  --color-positive: #ef4444;
+  --color-negative: #22c55e;
+}
+* { margin: 0; box-sizing: border-box; }
+body {
+  font-family: var(--font-sans);
+  color: var(--color-text-primary);
+  background: var(--color-background-primary);
+  padding: 16px; line-height: 1.5;
+}
+.header { margin-bottom: 12px; }
+.header h2 { font-size: 16px; font-weight: 600; }
+.header .sub { font-size: 12px; color: var(--color-text-secondary); margin-top: 2px; }
+#chart-main { width: 100%; height: 400px; }
+#chart-vol { width: 100%; height: 120px; }
+.summary { margin-top: 12px; padding: 12px; border: 1px solid var(--color-border-primary); border-radius: 8px; background: var(--color-background-secondary); }
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.summary-item { font-size: 12px; }
+.summary-label { color: var(--color-text-secondary); font-size: 11px; }
+.summary-value { font-family: var(--font-mono); font-weight: 600; }
+.loading { text-align: center; padding: 48px 0; color: var(--color-text-secondary); font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="app" class="loading">等待数据…</div>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<script>
+(function(){
+  var chartMain = null, chartVol = null;
+
+  window.addEventListener('message', function(e) {
+    var msg = e.data;
+    if (!msg || !msg.jsonrpc) return;
+    switch (msg.method) {
+      case 'ui/notifications/tool-result':
+        var raw = msg.params;
+        render(raw.structuredContent || parseContent(raw.content));
+        break;
+      case 'ui/notifications/host-context-changed':
+        if (msg.params && msg.params.styles && msg.params.styles.variables)
+          applyTheme(msg.params.styles.variables);
+        break;
+    }
+    if (msg.id !== undefined && msg.method === 'ui/initialize') {
+      window.parent.postMessage({ jsonrpc:'2.0', id: msg.id, result: {
+        protocolVersion: '2025-06-18',
+        appCapabilities: { availableDisplayModes: ['inline','fullscreen'] }
+      }}, '*');
+      window.parent.postMessage({ jsonrpc:'2.0', method:'ui/notifications/initialized', params:{} }, '*');
+    }
+  });
+
+  function parseContent(c) {
+    if (!c) return null;
+    var arr = Array.isArray(c) ? c : [c];
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i].type === 'text') try { return JSON.parse(arr[i].text); } catch(e) {}
+    }
+    return null;
+  }
+
+  function applyTheme(vars) {
+    var r = document.documentElement;
+    for (var k in vars) if (vars[k]) r.style.setProperty('--' + k, vars[k]);
+  }
+
+  function calcMA(items, period) {
+    var result = [];
+    for (var i = 0; i < items.length; i++) {
+      if (i < period - 1) { result.push(null); continue; }
+      var sum = 0;
+      for (var j = 0; j < period; j++) {
+        sum += items[i - j].close;
+      }
+      result.push(+(sum / period).toFixed(2));
+    }
+    return result;
+  }
+
+  function formatDate(d) {
+    if (!d) return '';
+    var s = String(d);
+    if (s.length === 8) return s.substring(0, 4) + '-' + s.substring(4, 6) + '-' + s.substring(6, 8);
+    return s;
+  }
+
+  function render(raw) {
+    if (!raw) return;
+    var tsCode = raw.ts_code || '';
+    var days = raw.days || '';
+    var dailyData = raw.daily_data || raw.data || {};
+    var items = dailyData.items || [];
+    var stats = dailyData.price_statistics || {};
+    var app = document.getElementById('app');
+    app.classList.remove('loading');
+
+    // If no items array, show summary fallback
+    if (!items.length) {
+      var title = tsCode + (days ? ' ' + days + '日' : '') + ' 行情统计';
+      var html = '<div class="header"><h2>' + title + '</h2>' +
+        '<div class="sub">数据来源：Tushare Pro' +
+        (dailyData.start_date ? ' | ' + formatDate(dailyData.start_date) + ' ~ ' + formatDate(dailyData.end_date) : '') +
+        '</div></div>';
+      if (stats && stats.max_price != null) {
+        html += '<div class="summary"><div class="summary-grid">' +
+          '<div class="summary-item"><div class="summary-label">最高价</div><div class="summary-value">' + stats.max_price + '</div></div>' +
+          '<div class="summary-item"><div class="summary-label">最低价</div><div class="summary-value">' + stats.min_price + '</div></div>' +
+          '<div class="summary-item"><div class="summary-label">均价</div><div class="summary-value">' + (stats.avg_price || '-') + '</div></div>' +
+          '<div class="summary-item"><div class="summary-label">波动率</div><div class="summary-value">' + (stats.price_volatility != null ? stats.price_volatility.toFixed(2) + '%' : '-') + '</div></div>' +
+          '<div class="summary-item"><div class="summary-label">最大单日涨幅</div><div class="summary-value" style="color:var(--color-positive)">' + (stats.max_single_day_gain != null ? '+' + stats.max_single_day_gain.toFixed(2) + '%' : '-') + '</div></div>' +
+          '<div class="summary-item"><div class="summary-label">最大单日跌幅</div><div class="summary-value" style="color:var(--color-negative)">' + (stats.max_single_day_loss != null ? stats.max_single_day_loss.toFixed(2) + '%' : '-') + '</div></div>' +
+          '</div></div>';
+      } else {
+        html += '<div class="summary" style="text-align:center;color:var(--color-text-secondary)">暂无明细数据（请设置 include_items=true 获取K线图）</div>';
+      }
+      app.innerHTML = html;
+      notifySize();
+      return;
+    }
+
+    // Build chart
+    var title = tsCode + (days ? ' ' + days + '日K线' : ' K线');
+    app.innerHTML = '<div class="header"><h2>' + title + '</h2>' +
+      '<div class="sub">数据来源：Tushare Pro | ' + formatDate(items[0].trade_date) + ' ~ ' + formatDate(items[items.length - 1].trade_date) +
+      ' | 共 ' + items.length + ' 个交易日</div></div>' +
+      '<div id="chart-main"></div><div id="chart-vol"></div>';
+
+    if (!window.echarts) { notifySize(); return; }
+
+    var dates = [];
+    var ohlc = [];
+    var volumes = [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      dates.push(formatDate(it.trade_date));
+      ohlc.push([it.open, it.close, it.low, it.high]);
+      volumes.push(it.vol || 0);
+    }
+
+    var ma5 = calcMA(items, 5);
+    var ma10 = calcMA(items, 10);
+    var ma20 = calcMA(items, 20);
+
+    // Main candlestick chart
+    var elMain = document.getElementById('chart-main');
+    chartMain = echarts.init(elMain);
+    chartMain.setOption({
+      animation: false,
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        formatter: function(params) {
+          if (!params || !params.length) return '';
+          var p = params[0];
+          var idx = p.dataIndex;
+          var it = items[idx];
+          var chgColor = (it.pct_chg || 0) >= 0 ? '#ef4444' : '#22c55e';
+          var chgSign = (it.pct_chg || 0) >= 0 ? '+' : '';
+          var lines = [
+            '<b>' + formatDate(it.trade_date) + '</b>',
+            '开: ' + it.open + '  高: ' + it.high,
+            '低: ' + it.low + '  收: ' + it.close,
+            '<span style="color:' + chgColor + '">涨跌幅: ' + chgSign + (it.pct_chg != null ? it.pct_chg.toFixed(2) : '-') + '%</span>',
+            '成交量: ' + ((it.vol || 0) / 100).toFixed(0) + '手'
+          ];
+          return lines.join('<br>');
+        }
+      },
+      grid: { left: 60, right: 20, top: 30, bottom: 60 },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        axisLine: { lineStyle: { color: '#999' } },
+        axisLabel: { fontSize: 10 }
+      },
+      yAxis: {
+        type: 'value',
+        scale: true,
+        splitLine: { lineStyle: { color: '#eee', type: 'dashed' } },
+        axisLabel: { fontSize: 10 }
+      },
+      dataZoom: [
+        { type: 'slider', xAxisIndex: 0, start: 0, end: 100, bottom: 8, height: 20 }
+      ],
+      series: [
+        {
+          name: 'K线',
+          type: 'candlestick',
+          data: ohlc,
+          itemStyle: {
+            color: '#ef4444',
+            color0: '#22c55e',
+            borderColor: '#ef4444',
+            borderColor0: '#22c55e'
+          }
+        },
+        {
+          name: 'MA5',
+          type: 'line',
+          data: ma5,
+          smooth: true,
+          lineStyle: { width: 1, color: '#f59e0b' },
+          symbol: 'none'
+        },
+        {
+          name: 'MA10',
+          type: 'line',
+          data: ma10,
+          smooth: true,
+          lineStyle: { width: 1, color: '#3b82f6' },
+          symbol: 'none'
+        },
+        {
+          name: 'MA20',
+          type: 'line',
+          data: ma20,
+          smooth: true,
+          lineStyle: { width: 1, color: '#a855f7' },
+          symbol: 'none'
+        }
+      ]
+    });
+
+    // Volume sub-chart
+    var elVol = document.getElementById('chart-vol');
+    chartVol = echarts.init(elVol);
+    var volData = [];
+    for (var vi = 0; vi < items.length; vi++) {
+      volData.push({
+        value: items[vi].vol || 0,
+        itemStyle: { color: items[vi].close >= items[vi].open ? '#ef4444' : '#22c55e' }
+      });
+    }
+    chartVol.setOption({
+      animation: false,
+      tooltip: {
+        trigger: 'axis',
+        formatter: function(params) {
+          if (!params || !params.length) return '';
+          var p = params[0];
+          return dates[p.dataIndex] + '<br>成交量: ' + ((p.value || 0) / 100).toFixed(0) + '手';
+        }
+      },
+      grid: { left: 60, right: 20, top: 10, bottom: 30 },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        axisLabel: { show: false },
+        axisLine: { lineStyle: { color: '#999' } }
+      },
+      yAxis: {
+        type: 'value',
+        scale: true,
+        splitLine: { lineStyle: { color: '#eee', type: 'dashed' } },
+        axisLabel: { fontSize: 10, formatter: function(v) { return (v / 100).toFixed(0); } }
+      },
+      dataZoom: [
+        { type: 'slider', xAxisIndex: 0, start: 0, end: 100, show: false }
+      ],
+      series: [{
+        name: '成交量',
+        type: 'bar',
+        data: volData,
+        barMaxWidth: 8
+      }]
+    });
+
+    // Link dataZoom between main and volume charts
+    chartMain.on('dataZoom', function(evt) {
+      var opt = chartMain.getOption();
+      if (opt.dataZoom && opt.dataZoom[0]) {
+        chartVol.dispatchAction({
+          type: 'dataZoom',
+          start: opt.dataZoom[0].start,
+          end: opt.dataZoom[0].end
+        });
+      }
+    });
+
+    window.addEventListener('resize', function() {
+      if (chartMain) chartMain.resize();
+      if (chartVol) chartVol.resize();
+    });
+
+    notifySize();
+  }
+
+  function notifySize() {
+    var h = document.documentElement.scrollHeight;
+    window.parent.postMessage({ jsonrpc:'2.0', method:'ui/notifications/size-changed', params:{ height: h } }, '*');
+  }
+})();
+</script>
+</body>
+</html>"""
+
+
+MONEYFLOW_CHART_HTML = """\
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>资金流向</title>
+<style>
+:root {
+  --color-background-primary: light-dark(#ffffff, #1a1a1a);
+  --color-background-secondary: light-dark(#f8f9fa, #222222);
+  --color-text-primary: light-dark(#171717, #e5e5e5);
+  --color-text-secondary: light-dark(#6b7280, #9ca3af);
+  --color-border-primary: light-dark(#e5e5e5, #333333);
+  --font-sans: system-ui, -apple-system, "PingFang SC", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", monospace;
+  --color-positive: #ef4444;
+  --color-negative: #22c55e;
+}
+* { margin: 0; box-sizing: border-box; }
+body {
+  font-family: var(--font-sans);
+  color: var(--color-text-primary);
+  background: var(--color-background-primary);
+  padding: 16px; line-height: 1.5;
+}
+.header { margin-bottom: 12px; }
+.header h2 { font-size: 16px; font-weight: 600; }
+.header .sub { font-size: 12px; color: var(--color-text-secondary); margin-top: 2px; }
+#chart { width: 100%; height: 400px; }
+.loading { text-align: center; padding: 48px 0; color: var(--color-text-secondary); font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="app" class="loading">等待数据…</div>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<script>
+(function(){
+  var myChart = null;
+
+  window.addEventListener('message', function(e) {
+    var msg = e.data;
+    if (!msg || !msg.jsonrpc) return;
+    switch (msg.method) {
+      case 'ui/notifications/tool-result':
+        var raw = msg.params;
+        render(raw.structuredContent || parseContent(raw.content));
+        break;
+      case 'ui/notifications/host-context-changed':
+        if (msg.params && msg.params.styles && msg.params.styles.variables)
+          applyTheme(msg.params.styles.variables);
+        break;
+    }
+    if (msg.id !== undefined && msg.method === 'ui/initialize') {
+      window.parent.postMessage({ jsonrpc:'2.0', id: msg.id, result: {
+        protocolVersion: '2025-06-18',
+        appCapabilities: { availableDisplayModes: ['inline','fullscreen'] }
+      }}, '*');
+      window.parent.postMessage({ jsonrpc:'2.0', method:'ui/notifications/initialized', params:{} }, '*');
+    }
+  });
+
+  function parseContent(c) {
+    if (!c) return null;
+    var arr = Array.isArray(c) ? c : [c];
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i].type === 'text') try { return JSON.parse(arr[i].text); } catch(e) {}
+    }
+    return null;
+  }
+
+  function applyTheme(vars) {
+    var r = document.documentElement;
+    for (var k in vars) if (vars[k]) r.style.setProperty('--' + k, vars[k]);
+  }
+
+  function formatDate(d) {
+    if (!d) return '';
+    var s = String(d);
+    if (s.length === 8) return s.substring(0, 4) + '-' + s.substring(4, 6) + '-' + s.substring(6, 8);
+    return s;
+  }
+
+  function toYi(v) {
+    if (v == null) return 0;
+    // Tushare moneyflow amounts are in thousand yuan (千元)
+    // Convert to 亿: divide by 100000 (1亿 = 100000千元)
+    return +(v / 100000).toFixed(4);
+  }
+
+  function render(raw) {
+    if (!raw) return;
+    var tsCode = raw.ts_code || '';
+    var items = raw.data || [];
+    if (!Array.isArray(items)) {
+      if (raw.data && Array.isArray(raw.data)) {
+        items = raw.data;
+      } else if (raw.items && Array.isArray(raw.items)) {
+        items = raw.items;
+      } else {
+        items = [];
+      }
+    }
+
+    var app = document.getElementById('app');
+    app.classList.remove('loading');
+
+    if (!items.length) {
+      app.innerHTML = '<div class="header"><h2>' + tsCode + ' 资金流向</h2></div>' +
+        '<div style="text-align:center;padding:48px 0;color:var(--color-text-secondary)">暂无资金流向数据</div>';
+      notifySize();
+      return;
+    }
+
+    // Sort by trade_date ascending
+    items.sort(function(a, b) {
+      return String(a.trade_date || '').localeCompare(String(b.trade_date || ''));
+    });
+
+    app.innerHTML = '<div class="header"><h2>' + tsCode + ' 资金流向</h2>' +
+      '<div class="sub">' + formatDate(items[0].trade_date) + ' ~ ' + formatDate(items[items.length - 1].trade_date) +
+      ' | 共 ' + items.length + ' 个交易日 | 单位：亿元</div></div>' +
+      '<div id="chart"></div>';
+
+    if (!window.echarts) { notifySize(); return; }
+
+    var dates = [];
+    var netTotal = [];
+    var netSm = [];
+    var netMd = [];
+    var netLg = [];
+    var netElg = [];
+
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      dates.push(formatDate(it.trade_date));
+
+      var netVal = it.net_mf_amount;
+      if (netVal == null) {
+        netVal = (it.buy_sm_amount || 0) + (it.buy_md_amount || 0) +
+                 (it.buy_lg_amount || 0) + (it.buy_elg_amount || 0) -
+                 (it.sell_sm_amount || 0) - (it.sell_md_amount || 0) -
+                 (it.sell_lg_amount || 0) - (it.sell_elg_amount || 0);
+      }
+      netTotal.push(toYi(netVal));
+      netSm.push(toYi((it.buy_sm_amount || 0) - (it.sell_sm_amount || 0)));
+      netMd.push(toYi((it.buy_md_amount || 0) - (it.sell_md_amount || 0)));
+      netLg.push(toYi((it.buy_lg_amount || 0) - (it.sell_lg_amount || 0)));
+      netElg.push(toYi((it.buy_elg_amount || 0) - (it.sell_elg_amount || 0)));
+    }
+
+    var el = document.getElementById('chart');
+    myChart = echarts.init(el);
+    myChart.setOption({
+      animation: false,
+      tooltip: {
+        trigger: 'axis',
+        formatter: function(params) {
+          if (!params || !params.length) return '';
+          var lines = ['<b>' + params[0].axisValue + '</b>'];
+          for (var pi = 0; pi < params.length; pi++) {
+            var p = params[pi];
+            var v = p.value;
+            var color = v >= 0 ? '#ef4444' : '#22c55e';
+            lines.push('<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + p.color + ';margin-right:4px"></span>' +
+              p.seriesName + ': <span style="color:' + color + '">' + (v >= 0 ? '+' : '') + v.toFixed(2) + '</span> 亿');
+          }
+          return lines.join('<br>');
+        }
+      },
+      legend: {
+        data: ['净流入', '散户净流入', '中户净流入', '大户净流入', '超大户净流入'],
+        bottom: 0,
+        textStyle: { fontSize: 11 }
+      },
+      grid: { left: 60, right: 20, top: 30, bottom: 80 },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        axisLine: { lineStyle: { color: '#999' } },
+        axisLabel: { fontSize: 10, rotate: 30 }
+      },
+      yAxis: {
+        type: 'value',
+        name: '亿元',
+        nameTextStyle: { fontSize: 11, color: '#999' },
+        splitLine: { lineStyle: { color: '#eee', type: 'dashed' } },
+        axisLabel: { fontSize: 10 }
+      },
+      dataZoom: [
+        { type: 'slider', xAxisIndex: 0, start: 0, end: 100, bottom: 36, height: 20 }
+      ],
+      series: [
+        {
+          name: '净流入',
+          type: 'line',
+          data: netTotal,
+          lineStyle: { width: 2, color: '#ef4444' },
+          itemStyle: { color: '#ef4444' },
+          symbol: 'circle',
+          symbolSize: 4,
+          areaStyle: {
+            color: {
+              type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+              colorStops: [
+                { offset: 0, color: 'rgba(239,68,68,0.15)' },
+                { offset: 1, color: 'rgba(239,68,68,0)' }
+              ]
+            }
+          }
+        },
+        {
+          name: '散户净流入',
+          type: 'line',
+          data: netSm,
+          lineStyle: { width: 1, color: '#9ca3af' },
+          itemStyle: { color: '#9ca3af' },
+          symbol: 'none'
+        },
+        {
+          name: '中户净流入',
+          type: 'line',
+          data: netMd,
+          lineStyle: { width: 1, color: '#60a5fa' },
+          itemStyle: { color: '#60a5fa' },
+          symbol: 'none'
+        },
+        {
+          name: '大户净流入',
+          type: 'line',
+          data: netLg,
+          lineStyle: { width: 1, color: '#f59e0b' },
+          itemStyle: { color: '#f59e0b' },
+          symbol: 'none'
+        },
+        {
+          name: '超大户净流入',
+          type: 'line',
+          data: netElg,
+          lineStyle: { width: 1, color: '#a855f7' },
+          itemStyle: { color: '#a855f7' },
+          symbol: 'none'
+        }
+      ]
+    });
+
+    window.addEventListener('resize', function() {
+      if (myChart) myChart.resize();
+    });
+
+    notifySize();
+  }
+
+  function notifySize() {
+    var h = document.documentElement.scrollHeight;
+    window.parent.postMessage({ jsonrpc:'2.0', method:'ui/notifications/size-changed', params:{ height: h } }, '*');
+  }
+})();
+</script>
+</body>
+</html>"""
+
+
 # ─────────────────────────────────────────────────────────
 # 资源注册
 # ─────────────────────────────────────────────────────────
@@ -567,4 +1145,40 @@ def register_ui_app_resources(mcp: FastMCP):
     def data_table_resource() -> str:
         return DATA_TABLE_HTML
 
-    logger.info("✅ Registered 3 ui:// MCP App resources")
+    @mcp.resource(
+        "ui://tushare/candlestick-chart",
+        name="K线图",
+        description="股票K线图（OHLC+成交量+均线），支持缩放",
+        mime_type="text/html",
+        meta={
+            "ui": {
+                "csp": {
+                    "connectDomains": [],
+                    "resourceDomains": ["https://cdn.jsdelivr.net"]
+                },
+                "prefersBorder": True
+            }
+        }
+    )
+    def candlestick_chart_resource() -> str:
+        return CANDLESTICK_CHART_HTML
+
+    @mcp.resource(
+        "ui://tushare/moneyflow-chart",
+        name="资金流向图",
+        description="个股资金流向多线折线图",
+        mime_type="text/html",
+        meta={
+            "ui": {
+                "csp": {
+                    "connectDomains": [],
+                    "resourceDomains": ["https://cdn.jsdelivr.net"]
+                },
+                "prefersBorder": True
+            }
+        }
+    )
+    def moneyflow_chart_resource() -> str:
+        return MONEYFLOW_CHART_HTML
+
+    logger.info("✅ Registered 5 ui:// MCP App resources")

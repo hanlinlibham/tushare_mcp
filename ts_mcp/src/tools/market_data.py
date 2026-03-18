@@ -8,9 +8,11 @@
 """
 
 import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 from datetime import datetime, timedelta
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 from ..cache import cache
 from ..utils.tushare_api import TushareAPI, fetch_daily_data
@@ -247,7 +249,7 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
     async def get_latest_daily_close(
         ts_code: str,
         stock_code: Optional[str] = None  # 兼容旧参数名，已废弃
-    ) -> Dict[str, Any]:
+    ) -> Union[ToolResult, Dict[str, Any]]:
         """获取股票/指数最新收盘价（日线数据，支持A股/港股/美股/指数）
 
         Args:
@@ -302,7 +304,15 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
             else:
                 _asset_type = "stock"
 
-            return {
+            # Build concise text summary for LLM
+            price = data.get("price")
+            pct_chg = data.get("pct_chg")
+            amount_val = data.get("amount")
+            pct_sign = "+" if pct_chg is not None and pct_chg >= 0 else ""
+            amount_yi = round(amount_val / 10000, 2) if amount_val else "N/A"
+            summary = f"{ts_code}: 收盘{price}, 涨跌{pct_sign}{pct_chg}%, 成交{amount_yi}亿"
+
+            structured = {
                 "success": True,
                 "ts_code": ts_code,
                 "asset_type": _asset_type,
@@ -317,6 +327,11 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
 
+            return ToolResult(
+                content=[TextContent(type="text", text=summary)],
+                structured_content=structured,
+            )
+
         except Exception as e:
             return {
                 "success": False,
@@ -324,7 +339,7 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
                 "ts_code": ts_code if 'ts_code' in locals() else None
             }
 
-    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS)
+    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS, meta={"ui": {"resourceUri": "ui://tushare/candlestick-chart", "visibility": ["model", "app"]}})
     async def get_historical_data(
         ts_code: str,
         days: int = 60,
@@ -437,7 +452,7 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
                 "ts_code": ts_code if 'ts_code' in locals() else None
             }
 
-    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS)
+    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS, meta={"ui": {"resourceUri": "ui://tushare/moneyflow-chart", "visibility": ["model", "app"]}})
     async def get_moneyflow(
         ts_code: str,
         start_date: Optional[str] = None,
