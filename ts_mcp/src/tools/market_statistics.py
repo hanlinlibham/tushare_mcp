@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
     """注册市场统计工具"""
 
-    @mcp.tool(tags={"市场统计"})
+    @mcp.tool(tags={"市场统计"}, meta={"ui": {"resourceUri": "ui://tushare/market-dashboard", "visibility": ["model", "app"]}})
     async def get_market_summary(
         trade_date: Optional[str] = None,
         market: str = "all",
@@ -270,7 +270,7 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
             logger.error(f"❌ get_market_summary error: {e}")
             return build_error_response(f"获取市场统计异常: {str(e)}", ErrorCode.UPSTREAM_ERROR)
 
-    @mcp.tool(tags={"市场统计"})
+    @mcp.tool(tags={"市场统计"}, meta={"ui": {"resourceUri": "ui://tushare/data-table", "visibility": ["model", "app"]}})
     async def get_market_extremes(
         trade_date: Optional[str] = None,
         metric: str = "pct_chg",
@@ -451,7 +451,7 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
             logger.error(f"❌ get_market_extremes error: {e}")
             return build_error_response(f"获取市场极值异常: {str(e)}", ErrorCode.UPSTREAM_ERROR)
 
-    @mcp.tool(tags={"市场统计"})
+    @mcp.tool(tags={"市场统计"}, meta={"ui": {"resourceUri": "ui://tushare/data-table", "visibility": ["model", "app"]}})
     async def get_batch_pct_chg(
         stock_codes: List[str],
         start_date: str,

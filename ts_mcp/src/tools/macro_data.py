@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     """注册宏观数据工具"""
 
-    @mcp.tool(tags={"宏观数据"})
+    @mcp.tool(tags={"宏观数据"}, meta={"ui": {"resourceUri": "ui://tushare/macro-panel", "visibility": ["model", "app"]}})
     async def get_macro_summary() -> Dict[str, Any]:
         """
         【宏观概览】一次调用获取最新的关键宏观经济指标

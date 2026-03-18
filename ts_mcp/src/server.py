@@ -57,6 +57,7 @@ from src.tools.fund_data import register_fund_tools
 # 导入 Resources 和 Prompts 注册函数
 from src.resources.entity_stats import register_entity_resources
 from src.resources.stock_data import register_stock_data_resources
+from src.resources.ui_apps import register_ui_app_resources
 from src.prompts.stock_analysis import register_stock_prompts
 from src.routes.data_download import register_data_routes
 from src.cache.data_file_store import data_file_store
@@ -132,6 +133,7 @@ def create_mcp_server() -> FastMCP:
     # 注册 Resources
     register_entity_resources(mcp, db)
     register_stock_data_resources(mcp, api)
+    register_ui_app_resources(mcp)
 
     # 注册 Prompts
     register_stock_prompts(mcp)
@@ -154,6 +156,8 @@ def create_mcp_server() -> FastMCP:
     mcp.add_transform(Visibility(enabled=True, names=CORE_TOOLS))
     # 3. 全局显示导航工具 (get_tool_manifest, focus_category, show_all_tools)
     mcp.add_transform(Visibility(enabled=True, tags={"导航"}))
+    # Re-enable all resources and templates (Visibility match_all hides them too)
+    mcp.add_transform(Visibility(enabled=True, components={"resource", "template"}))
 
     logger.info("✅ MCP Server initialized with progressive disclosure")
 

@@ -243,7 +243,7 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
                 "ts_code": ts_code if 'ts_code' in locals() else None
             }
 
-    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS)
+    @mcp.tool(tags={"行情数据"}, annotations=READONLY_ANNOTATIONS, meta={"ui": {"resourceUri": "ui://tushare/data-table", "visibility": ["model", "app"]}})
     async def get_latest_daily_close(
         ts_code: str,
         stock_code: Optional[str] = None  # 兼容旧参数名，已废弃
