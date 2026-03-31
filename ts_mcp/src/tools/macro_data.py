@@ -26,6 +26,7 @@ from ..cache import cache
 from ..utils.tushare_api import TushareAPI
 from ..utils.response import build_success_response, build_error_response, build_meta
 from ..utils.errors import ErrorCode
+from ..utils.large_data_handler import merge_large_data_payload, prepare_large_data_view
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,21 @@ def _build_series_ui(title: str, subtitle: str, panels: List[Dict[str, Any]], st
         "panels": panels,
         "stats": stats,
     }
+
+
+def _prepare_series_payload(
+    rows: List[Dict[str, Any]],
+    tool_name: str,
+    query_params: Dict[str, Any],
+    preview_mode: str = "head",
+) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    return prepare_large_data_view(
+        rows,
+        tool_name,
+        query_params,
+        preview_rows=24,
+        preview_mode=preview_mode,
+    )
 
 
 def register_macro_tools(mcp: FastMCP, api: TushareAPI):
@@ -430,17 +446,18 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                     "ti_yoy": float(row.get('ti_yoy', 0))
                 })
 
+            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_gdp_data", kwargs)
             latest = data[0] if data else {}
-            return {
+            result = {
                 "success": True,
-                "data": data,
+                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="GDP 趋势",
                     subtitle=f"{len(data)} 个季度",
                     panels=[
                         _build_series_panel(
                             title="GDP 总量",
-                            data=data,
+                            data=ui_rows,
                             x_field="quarter",
                             series=[
                                 {"name": "GDP", "field": "gdp"},
@@ -452,7 +469,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                         ),
                         _build_series_panel(
                             title="同比增速",
-                            data=data,
+                            data=ui_rows,
                             x_field="quarter",
                             series=[
                                 {"name": "GDP同比", "field": "gdp_yoy"},
@@ -483,6 +500,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
+            return merge_large_data_payload(result, large_payload)
 
         except Exception as e:
             logger.error(f"❌ get_gdp_data error: {e}")
@@ -562,16 +580,17 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "通胀压力"
             )
 
-            return {
+            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_cpi_data", kwargs)
+            result = {
                 "success": True,
-                "data": data,
+                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="CPI 趋势",
                     subtitle=f"{len(data)} 个月",
                     panels=[
                         _build_series_panel(
                             title="全国 CPI",
-                            data=data,
+                            data=ui_rows,
                             x_field="month",
                             series=[
                                 {"name": "同比", "field": "cpi_yoy"},
@@ -582,7 +601,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                         ),
                         _build_series_panel(
                             title="城乡 CPI",
-                            data=data,
+                            data=ui_rows,
                             x_field="month",
                             series=[
                                 {"name": "城镇同比", "field": "town_yoy"},
@@ -613,6 +632,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
+            return merge_large_data_payload(result, large_payload)
 
         except Exception as e:
             logger.error(f"❌ get_cpi_data error: {e}")
@@ -696,17 +716,18 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
             else:
                 trend = "数据不足"
 
+            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_pmi_data", kwargs)
             latest = data[0] if data else {}
-            return {
+            result = {
                 "success": True,
-                "data": data,
+                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="PMI 趋势",
                     subtitle=f"{len(data)} 个月",
                     panels=[
                         _build_series_panel(
                             title="PMI 景气度",
-                            data=data,
+                            data=ui_rows,
                             x_field="month",
                             series=[
                                 {"name": "制造业PMI", "field": "pmi"},
@@ -743,6 +764,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
+            return merge_large_data_payload(result, large_payload)
 
         except Exception as e:
             logger.error(f"❌ get_pmi_data error: {e}")
@@ -842,16 +864,17 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "流动性偏弱，资金观望为主"
             )
 
-            return {
+            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_money_supply", kwargs)
+            result = {
                 "success": True,
-                "data": data,
+                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="货币供应量",
                     subtitle=f"{len(data)} 个月",
                     panels=[
                         _build_series_panel(
                             title="货币总量",
-                            data=data,
+                            data=ui_rows,
                             x_field="month",
                             series=[
                                 {"name": "M0", "field": "m0"},
@@ -862,7 +885,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                         ),
                         _build_series_panel(
                             title="同比增速",
-                            data=data,
+                            data=ui_rows,
                             x_field="month",
                             series=[
                                 {"name": "M0同比", "field": "m0_yoy"},
@@ -898,6 +921,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
+            return merge_large_data_payload(result, large_payload)
 
         except Exception as e:
             logger.error(f"❌ get_money_supply error: {e}")
@@ -1112,18 +1136,19 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                     "consumer_yoy": float(row.get('ppi_cg_yoy', 0))     # 生活资料
                 })
 
+            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_ppi_data", kwargs)
             latest = data[0] if data else {}
             interpretation = "工业品价格下跌，企业面临降价压力" if data and data[0]['ppi_yoy'] < 0 else "工业品价格上涨"
-            return {
+            result = {
                 "success": True,
-                "data": data,
+                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="PPI 趋势",
                     subtitle=f"{len(data)} 个月",
                     panels=[
                         _build_series_panel(
                             title="PPI 变化",
-                            data=data,
+                            data=ui_rows,
                             x_field="month",
                             series=[
                                 {"name": "同比", "field": "ppi_yoy"},
@@ -1134,7 +1159,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                         ),
                         _build_series_panel(
                             title="分项走势",
-                            data=data,
+                            data=ui_rows,
                             x_field="month",
                             series=[
                                 {"name": "生产资料", "field": "production_yoy"},
@@ -1164,6 +1189,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
+            return merge_large_data_payload(result, large_payload)
 
         except Exception as e:
             logger.error(f"❌ get_ppi_data error: {e}")

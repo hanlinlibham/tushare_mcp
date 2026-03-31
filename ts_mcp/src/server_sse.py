@@ -61,6 +61,7 @@ from src.tools.macro_data import register_macro_tools
 
 # 导入 Resources 和 Prompts 注册函数
 from src.resources.entity_stats import register_entity_resources
+from src.resources.large_data import register_large_data_resources
 from src.resources.stock_data import register_stock_data_resources
 from src.resources.ui_apps import register_ui_app_resources
 from src.prompts.stock_analysis import register_stock_prompts
@@ -126,6 +127,7 @@ def create_mcp_server() -> FastMCP:
 
     # 注册 Resources
     register_entity_resources(mcp, db)
+    register_large_data_resources(mcp)
     register_stock_data_resources(mcp, api)
     register_ui_app_resources(mcp)
 

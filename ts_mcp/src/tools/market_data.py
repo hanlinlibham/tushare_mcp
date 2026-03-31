@@ -17,7 +17,7 @@ from mcp.types import TextContent
 
 from ..cache import cache
 from ..utils.tushare_api import TushareAPI, fetch_daily_data
-from ..utils.large_data_handler import handle_large_data
+from ..utils.large_data_handler import THRESHOLD, handle_large_data, merge_large_data_payload, prepare_large_data_view
 from .constants import READONLY_ANNOTATIONS
 
 KLINE_CHART_APP = AppConfig(
@@ -423,14 +423,38 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
                         }
                     }
 
+                    full_items = df.to_dict("records")
+                    large_items = None
+                    if len(full_items) > THRESHOLD:
+                        inline_limit = max(1, min(max_rows, 120))
+                        large_items = handle_large_data(
+                            full_items,
+                            "get_historical_data",
+                            {
+                                "ts_code": ts_code,
+                                "start_date": start_date,
+                                "end_date": end_date,
+                                "days": days,
+                            },
+                            preview_rows=inline_limit,
+                            preview_mode="tail",
+                        )
+
                     # P1-3: 默认不返回详细列表，减少返回体大小
                     if include_items:
-                        # 限制返回行数
-                        items_df = df.tail(max_rows) if len(df) > max_rows else df
-                        daily_data["items"] = items_df.to_dict('records')
-                        daily_data["items_truncated"] = len(df) > max_rows
-                        if len(df) > max_rows:
-                            daily_data["items_note"] = f"仅返回最近 {max_rows} 条，共 {len(df)} 条"
+                        inline_limit = max_rows
+                        if large_items and "is_truncated" in large_items:
+                            inline_limit = max(1, min(max_rows, 120))
+                        items_df = df.tail(inline_limit) if len(df) > inline_limit else df
+                        daily_data["items"] = items_df.to_dict("records")
+                        daily_data["items_truncated"] = len(df) > inline_limit
+                        if len(df) > inline_limit:
+                            note = f"仅内联最近 {inline_limit} 条，共 {len(df)} 条"
+                            if large_items and "is_truncated" in large_items:
+                                note += f"；完整数据请读取 {large_items['resource_uri']}"
+                            daily_data["items_note"] = note
+                        if large_items and "is_truncated" in large_items:
+                            daily_data["items_resource_uri"] = large_items["resource_uri"]
                 else:
                     daily_data = {"error": "无历史数据"}
             else:
@@ -458,12 +482,16 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
                     "end_date": end_date,
                     "timestamp": datetime.now().isoformat()
                 }
+                if large_items and "is_truncated" in large_items:
+                    structured = merge_large_data_payload(structured, large_items)
                 # Build text summary for LLM
                 _stats = daily_data.get("price_statistics", {})
                 _trend = daily_data.get("trend_statistics", {})
                 _chg = _trend.get("total_change", 0)
                 _chg_s = f"+{_chg}%" if _chg >= 0 else f"{_chg}%"
                 _summary = f"{ts_code}: 最新{_stats.get('latest_price','-')}, 区间{_chg_s}, 最高{_stats.get('max_price','-')}, 最低{_stats.get('min_price','-')}, {daily_data.get('data_count',0)}个交易日"
+                if large_items and "is_truncated" in large_items:
+                    _summary += f"；完整序列资源 {large_items['resource_uri']}"
                 return ToolResult(
                     content=[TextContent(type="text", text=_summary)],
                     structured_content=structured,
@@ -531,24 +559,32 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
             df = df.sort_values('trade_date')
             data = df.to_dict('records')
 
+            large_payload, _, ui_rows = prepare_large_data_view(
+                data,
+                "get_moneyflow",
+                {"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
+                preview_rows=30,
+                preview_mode="tail",
+            )
             structured = {
                 "success": True,
                 "ts_code": ts_code,
                 "start_date": start_date,
                 "end_date": end_date,
                 "count": len(data),
+                "data": ui_rows,
                 "timestamp": datetime.now().isoformat()
             }
-            large = handle_large_data(data, "get_moneyflow", {"ts_code": ts_code, "start_date": start_date, "end_date": end_date})
-            if "is_truncated" in large:
-                structured.update(large)
-            else:
-                structured["data"] = large["data"]
+            structured = merge_large_data_payload(structured, large_payload)
+            if "is_truncated" in large_payload:
+                structured["data_note"] = f"图表内联 {len(ui_rows)} 条，完整数据请读取 {large_payload['resource_uri']}"
 
             # Text summary for LLM
             _net_total = sum((r.get("net_mf_amount") or 0) for r in data) / 100000  # 亿
             _net_sign = "+" if _net_total >= 0 else ""
             _summary = f"{ts_code} 资金流向: {start_date}~{end_date}, {len(data)}个交易日, 净流入{_net_sign}{_net_total:.2f}亿"
+            if "is_truncated" in large_payload:
+                _summary += f"；完整数据资源 {large_payload['resource_uri']}"
             return ToolResult(
                 content=[TextContent(type="text", text=_summary)],
                 structured_content=structured,

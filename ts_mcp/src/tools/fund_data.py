@@ -15,6 +15,7 @@ import logging
 
 from ..cache import cache
 from ..utils.tushare_api import TushareAPI
+from ..utils.large_data_handler import handle_large_data, merge_large_data_payload, prepare_large_data_view
 from .constants import READONLY_ANNOTATIONS
 
 logger = logging.getLogger(__name__)
@@ -238,15 +239,23 @@ def register_fund_tools(mcp: FastMCP, api: TushareAPI):
 
             df = df.sort_values("nav_date")
             data = df.to_dict("records")
+            large_payload, inline_rows, ui_rows = prepare_large_data_view(
+                data,
+                "get_fund_nav",
+                kwargs,
+                preview_rows=24,
+                preview_mode="tail",
+            )
 
-            return {
+            result = {
                 "success": True,
                 "ts_code": ts_code,
                 "count": len(data),
-                "data": data,
-                "ui": _build_fund_nav_ui(ts_code, data),
+                "data": inline_rows,
+                "ui": _build_fund_nav_ui(ts_code, ui_rows),
                 "timestamp": datetime.now().isoformat(),
             }
+            return merge_large_data_payload(result, large_payload)
 
         except Exception as e:
             return {"success": False, "error": f"获取基金净值异常: {str(e)}", "ts_code": ts_code}
@@ -308,14 +317,24 @@ def register_fund_tools(mcp: FastMCP, api: TushareAPI):
                 df = df.sort_values("mkv", ascending=False)
 
             data = df.to_dict("records")
+            large_payload = handle_large_data(
+                data,
+                "get_fund_portfolio",
+                kwargs,
+                preview_rows=20,
+            )
 
-            return {
+            result = {
                 "success": True,
                 "query": {"ts_code": ts_code, "symbol": symbol, "period": period},
                 "count": len(data),
-                "data": data,
                 "timestamp": datetime.now().isoformat(),
             }
+            if "is_truncated" in large_payload:
+                result = merge_large_data_payload(result, large_payload)
+            else:
+                result["data"] = large_payload["data"]
+            return result
 
         except Exception as e:
             return {"success": False, "error": f"获取基金持仓异常: {str(e)}"}

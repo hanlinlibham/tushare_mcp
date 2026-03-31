@@ -14,7 +14,7 @@ import logging
 
 from ..cache import cache
 from ..utils.tushare_api import TushareAPI
-from ..utils.large_data_handler import handle_large_data
+from ..utils.large_data_handler import handle_large_data, merge_large_data_payload, prepare_large_data_view
 from .constants import READONLY_ANNOTATIONS
 
 logger = logging.getLogger(__name__)
@@ -141,7 +141,7 @@ def register_index_tools(mcp: FastMCP, api: TushareAPI):
                 "count": len(constituents),
                 "timestamp": datetime.now().isoformat()
             }
-            large = handle_large_data(constituents, "get_index_weight", {"index_code": index_code, "trade_date": trade_date})
+            large = handle_large_data(constituents, "get_index_weight", {"index_code": index_code, "trade_date": trade_date}, preview_rows=20)
             if "is_truncated" in large:
                 result.update(large)
             else:
@@ -220,20 +220,22 @@ def register_index_tools(mcp: FastMCP, api: TushareAPI):
             df = df.sort_values('trade_date')
             data = df.to_dict('records')
 
+            large_payload, inline_rows, ui_rows = prepare_large_data_view(
+                data,
+                "get_index_valuation",
+                {"ts_code": ts_code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date},
+                preview_rows=24,
+                preview_mode="tail",
+            )
             result = {
                 "success": True,
                 "ts_code": ts_code,
                 "count": len(data),
+                "data": inline_rows,
+                "ui": _build_index_valuation_ui(ts_code, ui_rows),
                 "timestamp": datetime.now().isoformat()
             }
-            large = handle_large_data(data, "get_index_valuation", {"ts_code": ts_code, "trade_date": trade_date})
-            if "is_truncated" in large:
-                result.update(large)
-                result["ui"] = _build_index_valuation_ui(ts_code, large.get("preview", []))
-            else:
-                result["data"] = large["data"]
-                result["ui"] = _build_index_valuation_ui(ts_code, large["data"])
-            return result
+            return merge_large_data_payload(result, large_payload)
 
         except Exception as e:
             return {
@@ -321,7 +323,7 @@ def register_index_tools(mcp: FastMCP, api: TushareAPI):
                     "count": len(data),
                     "timestamp": datetime.now().isoformat()
                 }
-                large = handle_large_data(data, "get_industry_overview_sw", {"index_code": index_code, "ts_code": ts_code})
+                large = handle_large_data(data, "get_industry_overview_sw", {"index_code": index_code, "ts_code": ts_code}, preview_rows=20)
                 if "is_truncated" in large:
                     result.update(large)
                 else:
@@ -351,7 +353,7 @@ def register_index_tools(mcp: FastMCP, api: TushareAPI):
                     "count": len(data),
                     "timestamp": datetime.now().isoformat()
                 }
-                large = handle_large_data(data, "get_industry_overview_ci", {"index_code": index_code, "ts_code": ts_code})
+                large = handle_large_data(data, "get_industry_overview_ci", {"index_code": index_code, "ts_code": ts_code}, preview_rows=20)
                 if "is_truncated" in large:
                     result.update(large)
                 else:

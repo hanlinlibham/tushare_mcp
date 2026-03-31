@@ -17,6 +17,7 @@ import logging
 from ..cache import cache
 from ..cache.calc_cache import calc_metrics_cache
 from ..utils.tushare_api import TushareAPI, fetch_daily_data
+from ..utils.large_data_handler import sample_rows
 # P0-2: 使用共享的日期容错工具
 from ..utils.data_processing import adjust_end_date_to_latest_trading_day as _adjust_end_date_to_latest_trading_day
 
@@ -645,9 +646,13 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                 
                 # 资源 URI：stock://calc_metrics/{calc_id}
                 # 查询特定股票对：stock://calc_metrics/{calc_id}?{stock_a}_{stock_b}
+                sampled_time_series = {
+                    code: sample_rows(series, max_points=120)
+                    for code, series in time_series.items()
+                }
                 result["calc_id"] = calc_id
                 result["resource_uri"] = f"stock://calc_metrics/{calc_id}"
-                result["time_series"] = time_series  # 仍然返回数据，支持直接使用
+                result["time_series"] = sampled_time_series
 
             elif analysis_type == "beta":
                 # 计算贝塔系数（相对于第一只股票）
@@ -1274,6 +1279,10 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                 correlation_matrix=safe_corr_dict  # 🔥 使用处理过 NaN 的字典
             )
 
+            sampled_time_series = {
+                code: sample_rows(series, max_points=120)
+                for code, series in time_series.items()
+            }
             result = {
                 "success": True,
                 "type": "text",
@@ -1284,7 +1293,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                 # 🔥 新增：股票代码到名称的映射，方便LLM准确解读
                 "stock_names": stock_names,
                 # 🔥 新增：时间序列数据，用于前端绘制股价对比图
-                "time_series": time_series,
+                "time_series": sampled_time_series,
                 # 🔥 新增：资源 URI，支持前端按需加载派生指标
                 "calc_id": calc_id,
                 "resource_uri": f"stock://calc_metrics/{calc_id}",
@@ -1292,7 +1301,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                     title=f"{metric} 相关性矩阵",
                     subtitle=f"{start_date} - {end_date} · {len(ts_codes_list)} 个标的",
                     correlation_matrix=safe_corr_dict,
-                    time_series=time_series,
+                    time_series=sampled_time_series,
                     stock_names=stock_names,
                 ),
             }
