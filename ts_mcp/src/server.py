@@ -113,7 +113,7 @@ class SessionExpiredMiddleware:
 
 
 from src.cache import cache
-from src.database import EntityDatabase
+from src.entity_store import EntityStore
 from src.utils.tushare_api import TushareAPI
 
 # 导入工具注册函数
@@ -182,12 +182,21 @@ def create_mcp_server() -> FastMCP:
     
     # 初始化组件
     api = TushareAPI(config.TUSHARE_TOKEN)
-    db = EntityDatabase(config.BACKEND_API_URL)
+    db = EntityStore()
+    
+    # 启动时加载实体数据（A 股 + ETF）
+    import asyncio
+    try:
+        _count = asyncio.get_event_loop().run_until_complete(db.load(api))
+        logger.info(f"   - EntityStore loaded {_count} entities")
+    except RuntimeError:
+        # 如果没有 event loop（不太可能），延迟加载
+        logger.warning("EntityStore deferred loading (no event loop)")
     
     logger.info(f"✅ Initialized components:")
     logger.info(f"   - TushareAPI: {api}")
     logger.info(f"   - Cache: {cache}")
-    logger.info(f"   - Database: {db}")
+    logger.info(f"   - EntityStore: {db}")
     
     # 注册工具（模块化）
     logger.info("📦 Registering tools...")

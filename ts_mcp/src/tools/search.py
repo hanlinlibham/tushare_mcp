@@ -13,11 +13,11 @@ from datetime import datetime
 from fastmcp import FastMCP
 
 from ..config import config
-from ..database import EntityDatabase
+from ..entity_store import EntityStore
 from ..utils.tushare_api import TushareAPI
 
 
-def register_search_tools(mcp: FastMCP, api: TushareAPI, db: EntityDatabase):
+def register_search_tools(mcp: FastMCP, api: TushareAPI, db: EntityStore):
     """注册搜索查询工具"""
 
     @mcp.tool(tags={"搜索"})

@@ -205,8 +205,10 @@ async def fetch_daily_data(cache, api: 'TushareAPI', ts_code: str, cache_type: s
                     df[col] = None
         return df
 
-    # A 股：走现有 index/stock 路由
-    if api.is_index_code(ts_code):
+    # A 股：走现有 fund/index/stock 路由
+    if api.is_fund_code(ts_code):
+        return await cache.cached_call(api.pro.fund_daily, cache_type=cache_type, ts_code=ts_code, **kwargs)
+    elif api.is_index_code(ts_code):
         func = api.get_index_daily_func(ts_code)
         df = await cache.cached_call(func, cache_type=cache_type, ts_code=ts_code, **kwargs)
         if df is not None and not df.empty:

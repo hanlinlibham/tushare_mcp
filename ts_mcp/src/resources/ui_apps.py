@@ -644,7 +644,7 @@ body {
           '<div class="summary-item"><div class="summary-label">最大单日跌幅</div><div class="summary-value" style="color:var(--color-negative)">' + (stats.max_single_day_loss != null ? stats.max_single_day_loss.toFixed(2) + '%' : '-') + '</div></div>' +
           '</div></div>';
       } else {
-        html += '<div class="summary" style="text-align:center;color:var(--color-text-secondary)">暂无明细数据（请设置 include_items=true 获取K线图）</div>';
+        html += '<div class="summary" style="text-align:center;color:var(--color-text-secondary)">暂无行情数据</div>';
       }
       app.innerHTML = html;
       notifySize();

@@ -135,6 +135,7 @@ async def adjust_date_to_trading_day(
         (adjusted_date, message): 调整后的日期和说明信息
     """
     try:
+        date = date.replace('-', '')  # 兼容 YYYY-MM-DD 格式
         original_date = date
         check_start = (datetime.strptime(date, '%Y%m%d') - timedelta(days=15)).strftime('%Y%m%d')
 
@@ -209,6 +210,8 @@ async def validate_date_range(
     Returns:
         (adjusted_start, adjusted_end, message): 调整后的日期范围和说明
     """
+    start_date = start_date.replace('-', '')  # 兼容 YYYY-MM-DD 格式
+    end_date = end_date.replace('-', '')
     messages = []
 
     # 调整结束日期
