@@ -2,13 +2,14 @@
 
 当工具返回行数 > THRESHOLD 时，自动存为独立数据资源，
 并仅内联预览数据、摘要和资源 URI。
+小数据也会带上列 schema（contract 一致）。
 """
 
 import logging
 from math import ceil
 from typing import Dict, List, Any, Optional, Callable, Literal
 
-from ..cache.data_file_store import data_file_store
+from ..cache.data_file_store import data_file_store, infer_schema
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,6 @@ def _build_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     keys = rows[0].keys()
 
-    # 检测日期列
     date_cols = [k for k in keys if "date" in k.lower()]
     for col in date_cols:
         vals = [r[col] for r in rows if r.get(col)]
@@ -70,11 +70,9 @@ def _build_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             summary["date_range"] = f"{min(vals)} ~ {max(vals)}"
             break
 
-    # 数值列统计
     for col in keys:
         if col in date_cols or col in ("ts_code", "index_code", "con_code", "con_name", "trade_date"):
             continue
-        # 尝试提取数值
         nums = []
         for r in rows:
             v = r.get(col)
@@ -83,7 +81,7 @@ def _build_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                     nums.append(float(v))
                 except (ValueError, TypeError):
                     break
-        if len(nums) > len(rows) * 0.5:  # 至少一半行有数值
+        if len(nums) > len(rows) * 0.5:
             summary[col] = {
                 "latest": round(nums[-1], 4),
                 "min": round(min(nums), 4),
@@ -126,6 +124,9 @@ def merge_large_data_payload(result: Dict[str, Any], large_payload: Dict[str, An
     """将大数据 payload 合并进工具返回。"""
     if "is_truncated" in large_payload:
         result.update(large_payload)
+    elif "schema" in large_payload:
+        # 小数据也透传 schema，便于下游统一构造 ColDef
+        result.setdefault("schema", large_payload["schema"])
     return result
 
 
@@ -139,29 +140,21 @@ def handle_large_data(
 ) -> Dict[str, Any]:
     """大数据分流：小数据 inline，大数据存文件返回摘要。
 
-    Args:
-        rows: 数据行列表 (list of dicts)
-        tool_name: 工具名称
-        query_params: 查询参数 (用于元信息)
-        summary_builder: 自定义摘要生成函数，签名 (rows) -> dict
-        preview_rows: 预览行数
-
-    Returns:
-        适合直接作为工具返回值的 dict
+    无论哪条分支，返回 dict 都带 `schema` 字段（{col: {"type": date|string|number|bool}}），
+    供下游（artifact renderer 等）构造列类型。
     """
     total = len(rows)
+    columns = list(rows[0].keys()) if rows else []
+    schema = infer_schema(rows, columns)
 
     if total <= THRESHOLD:
-        # 小数据，直接返回
-        return {"data": rows, "total_rows": total}
+        return {"data": rows, "total_rows": total, "schema": schema}
 
-    # 大数据：存文件 + 生成资源 URI
     meta = data_file_store.store(rows, tool_name, query_params)
     urls = data_file_store.get_download_urls(meta.data_id)
     resource_uri = build_data_resource_uri(meta.data_id)
     preview = build_preview_rows(rows, preview_rows, mode=preview_mode)
 
-    # 摘要
     if summary_builder:
         summary = summary_builder(rows)
     else:
@@ -176,5 +169,6 @@ def handle_large_data(
         "download_urls": urls,
         "preview": preview,
         "summary": summary,
+        "schema": meta.schema,
         "expires_in": "24小时",
     }

@@ -43,6 +43,7 @@ def register_large_data_resources(mcp: FastMCP):
                 "query_params": meta.query_params,
                 "total_rows": meta.total_rows,
                 "columns": meta.columns,
+                "schema": meta.schema,
                 "download_urls": data_file_store.get_download_urls(data_id),
                 "created_at": meta.created_at,
                 "expires_at": meta.expires_at,

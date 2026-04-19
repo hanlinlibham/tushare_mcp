@@ -1,8 +1,8 @@
 """数据文件下载端点
 
-GET /data/{data_id}.jsonl -> 下载 JSONL 文件（供 AG Grid 渲染）
-GET /data/{data_id}.json  -> 下载 JSON 文件（MCP 资源回读 / 兜底）
-GET /data/{data_id}/info  -> 查看文件元信息 (调试用)
+GET /data/{data_id}.jsonl -> 下载 JSONL 文件（行式 JSON）
+GET /data/{data_id}.json  -> 下载 JSON 文件（整体数组）
+GET /data/{data_id}/info  -> 查看文件元信息 + 列 schema (调试 / 消费方查询)
 """
 
 import logging
@@ -63,6 +63,7 @@ def register_data_routes(mcp):
             "query_params": meta.query_params,
             "total_rows": meta.total_rows,
             "columns": meta.columns,
+            "schema": meta.schema,
             "download_urls": urls,
             "created_at": meta.created_at,
             "expires_at": meta.expires_at,
