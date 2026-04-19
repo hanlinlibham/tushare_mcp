@@ -24,6 +24,7 @@ from ..utils.data_processing import adjust_date_to_trading_day, get_latest_tradi
 from ..utils.response import build_success_response, build_error_response, build_meta
 from ..utils.errors import ErrorCode
 from ..utils.ui_hint import append_hint_to_summary
+from ..utils.artifact_payload import build_artifact_fields, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,9 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
     async def get_market_summary(
         trade_date: Optional[str] = None,
         market: str = "all",
-        include_st: bool = False
+        include_st: bool = False,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Union[ToolResult, Dict[str, Any]]:
         """
         【市场概况】一次调用获取A股整体涨跌/成交/涨停跌停统计
@@ -295,15 +298,25 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
 
-            summary = append_hint_to_summary(
-                summary,
-                "ui://findata/market-dashboard",
-                items_path="data",
-                extra_stats=f"均值{pct_chg_stats['mean']}%, 中位数{pct_chg_stats['median']}%",
+            # data 这里是聚合快照（dict），展平为 1 行给 as_file 用
+            _ms_rows = [data] if isinstance(data, dict) else list(data or [])
+            _artifact = build_artifact_fields(
+                _ms_rows,
+                tool_name="get_market_summary",
+                query_params={"trade_date": adjusted_date, "market": market, "include_st": include_st},
+                ui_uri="ui://findata/market-dashboard",
+                as_file=as_file,
+                include_ui=include_ui,
             )
+            _meta_override = _artifact.pop("_meta_override", None)
+            _hint = _artifact.pop("_llm_hint", "")
+            structured.update(_artifact)
+            structured["_llm_hint"] = _hint
+            summary = f"{summary}\n\n{_hint}" if _hint else summary
             return ToolResult(
                 content=[TextContent(type="text", text=summary)],
                 structured_content=structured,
+                meta=_meta_override,
             )
 
         except Exception as e:
@@ -512,6 +525,8 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
         stock_codes: Optional[List[str]] = None,
         start_date: str = "",
         end_date: Optional[str] = None,
+        as_file: bool = False,
+        include_ui: bool = True,
         ts_codes: Optional[List[str]] = None,  # 兼容别名
         codes: Optional[List[str]] = None  # 兼容别名
     ) -> Union[ToolResult, Dict[str, Any]]:
@@ -744,15 +759,23 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
 
-            summary = append_hint_to_summary(
-                summary,
-                "ui://findata/data-table",
-                items_path="data.results",
-                items_count=len(pct_changes),
+            _artifact = build_artifact_fields(
+                results or [],
+                tool_name="get_batch_pct_chg",
+                query_params={"stock_codes": ",".join(stock_codes or []), "start_date": start_date, "end_date": adjusted_end},
+                ui_uri="ui://findata/data-table",
+                as_file=as_file,
+                include_ui=include_ui,
             )
+            _meta_override = _artifact.pop("_meta_override", None)
+            _hint = _artifact.pop("_llm_hint", "")
+            structured.update(_artifact)
+            structured["_llm_hint"] = _hint
+            summary = f"{summary}\n\n{_hint}" if _hint else summary
             return ToolResult(
                 content=[TextContent(type="text", text=summary)],
                 structured_content=structured,
+                meta=_meta_override,
             )
 
         except Exception as e:

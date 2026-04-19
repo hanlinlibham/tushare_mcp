@@ -10,7 +10,10 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 from ..cache.data_file_store import data_file_store, infer_schema
 
@@ -131,6 +134,52 @@ def build_artifact_fields(
     # 给调用方的 meta override：include_ui=False 时让 ToolResult 显式塞 {'ui': None}
     fields["_meta_override"] = {"ui": None} if not include_ui else None
     return fields
+
+
+def finalize_artifact_result(
+    *,
+    rows: List[Dict[str, Any]],
+    result: Dict[str, Any],
+    tool_name: str,
+    query_params: Dict[str, Any],
+    ui_uri: str,
+    as_file: bool,
+    include_ui: bool,
+    summary_text: Optional[str] = None,
+    preview_limit: int = 20,
+    filename: Optional[str] = None,
+) -> Union[ToolResult, Dict[str, Any]]:
+    """把 artifact fields merge 进 result dict，按 include_ui 决定返回形态。
+
+    - include_ui=True  → 直接返回 dict（保留工具既有返回类型，fastmcp 会自动包装）
+    - include_ui=False → 返回 ToolResult(meta={'ui': None}) 携带覆盖信号
+
+    在 result 上覆盖/追加：row_count, columns, rows_preview, schema, path（仅
+    as_file=True）, download_urls, _llm_hint。
+    """
+    fields = build_artifact_fields(
+        rows,
+        tool_name=tool_name,
+        query_params=query_params,
+        ui_uri=ui_uri,
+        as_file=as_file,
+        include_ui=include_ui,
+        preview_limit=preview_limit,
+        filename=filename,
+    )
+    meta_override = fields.pop("_meta_override", None)
+    hint = fields.pop("_llm_hint", "")
+    result.update(fields)
+    result["_llm_hint"] = hint
+
+    if meta_override is None:
+        return result
+    content = [TextContent(type="text", text=summary_text or hint or "")]
+    return ToolResult(
+        content=content,
+        structured_content=result,
+        meta=meta_override,
+    )
 
 
 AS_FILE_INCLUDE_UI_DECISION_GUIDE = """

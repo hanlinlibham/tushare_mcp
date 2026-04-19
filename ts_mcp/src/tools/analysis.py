@@ -19,6 +19,7 @@ from ..cache.calc_cache import calc_metrics_cache
 from ..utils.tushare_api import TushareAPI, fetch_daily_data
 from ..utils.large_data_handler import sample_rows
 from ..utils.ui_hint import attach_hint_to_dict
+from ..utils.artifact_payload import finalize_artifact_result, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 # P0-2: 使用共享的日期容错工具
 from ..utils.data_processing import adjust_end_date_to_latest_trading_day as _adjust_end_date_to_latest_trading_day
 
@@ -286,6 +287,8 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
         metrics: List[str] = ["pe", "roe", "revenue_yoy"],
         period: str = "3y",
         calc_type: str = "raw",
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         获取财务指标与增长分析（聚合工具）
@@ -473,10 +476,18 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
             if result["metrics"]:
                 result["success"] = True
                 result["ui"] = _build_financial_metrics_ui(ts_code, period, calc_type, result["metrics"])
-                return attach_hint_to_dict(
-                    result,
-                    "ui://findata/financial-metrics-chart",
-                    items_path="metrics",
+                _fm_rows = [
+                    {"metric": k, **(v if isinstance(v, dict) else {"value": v})}
+                    for k, v in result["metrics"].items()
+                ]
+                return finalize_artifact_result(
+                    rows=_fm_rows,
+                    result=result,
+                    tool_name="get_financial_metrics",
+                    query_params={"ts_code": ts_code, "period": period, "calc_type": calc_type, "metrics": ",".join(metrics or [])},
+                    ui_uri="ui://findata/financial-metrics-chart",
+                    as_file=as_file,
+                    include_ui=include_ui,
                 )
             else:
                 return {
@@ -497,7 +508,9 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
         stock_codes: List[str],
         start_date: str = None,
         end_date: str = None,
-        analysis_type: str = "correlation"
+        analysis_type: str = "correlation",
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         量化分析工具（相关性、贝塔、业绩对比）
@@ -797,11 +810,20 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                     stock_names=stock_names,
                 )
 
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/correlation-matrix",
-                items_path="correlation_matrix",
-                items_count=len(stock_names),
+            # 把相关性矩阵展平为行：每行 {a, b, value}，方便 as_file 导出
+            _corr_rows = []
+            for a, inner in (result.get("correlation_matrix") or {}).items():
+                if isinstance(inner, dict):
+                    for b, val in inner.items():
+                        _corr_rows.append({"stock_a": a, "stock_b": b, "correlation": val})
+            return finalize_artifact_result(
+                rows=_corr_rows,
+                result=result,
+                tool_name="analyze_price_correlation",
+                query_params={"stock_codes": ",".join(stock_codes or []), "start_date": start_date, "end_date": end_date, "analysis_type": analysis_type},
+                ui_uri="ui://findata/correlation-matrix",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:
@@ -1035,7 +1057,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
             }
 
     @mcp.tool(tags={"量化分析"}, app=CORRELATION_MATRIX_APP)
-    async def calculate_metrics(stock_codes: List[str], start_date: str = None, end_date: str = None, metric: str = "close") -> Dict[str, Any]:
+    async def calculate_metrics(stock_codes: List[str], start_date: str = None, end_date: str = None, metric: str = "close", as_file: bool = False, include_ui: bool = True) -> Dict[str, Any]:
         """
         计算一组股票的金融指标（相关性矩阵）
 
@@ -1338,11 +1360,20 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                 result["date_adjusted"] = True
                 result["date_adjust_message"] = date_adjust_msg
 
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/correlation-matrix",
-                items_path="correlation_matrix",
-                items_count=len(ts_codes_list),
+            # 相关性矩阵展平为行
+            _corr_rows = []
+            for a, inner in (safe_corr_dict or {}).items():
+                if isinstance(inner, dict):
+                    for b, val in inner.items():
+                        _corr_rows.append({"stock_a": a, "stock_b": b, "correlation": val})
+            return finalize_artifact_result(
+                rows=_corr_rows,
+                result=result,
+                tool_name="calculate_metrics",
+                query_params={"stock_codes": ",".join(ts_codes_list or []), "start_date": start_date, "end_date": end_date, "metric": metric},
+                ui_uri="ui://findata/correlation-matrix",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:

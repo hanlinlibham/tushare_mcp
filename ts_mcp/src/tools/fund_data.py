@@ -17,6 +17,7 @@ from ..cache import cache
 from ..utils.tushare_api import TushareAPI
 from ..utils.large_data_handler import handle_large_data, merge_large_data_payload, prepare_large_data_view
 from ..utils.ui_hint import attach_hint_to_dict
+from ..utils.artifact_payload import finalize_artifact_result, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 from .constants import READONLY_ANNOTATIONS
 
 logger = logging.getLogger(__name__)
@@ -204,15 +205,20 @@ def register_fund_tools(mcp: FastMCP, api: TushareAPI):
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         market: Optional[str] = None,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
-        """获取基金净值时间序列（单位净值、累计净值、调整净值）
+        """获取基金净值时间序列（单位净值、累计净值、调整净值）。
+返回形态（默认）：内嵌净值曲线 UI（ui://findata/fund-nav-chart）+ 结构化数据预览。
 
-        Args:
-            ts_code: 基金代码，如 '510300.SH'、'000001.OF'
-            start_date: 开始日期(YYYYMMDD)
-            end_date: 结束日期(YYYYMMDD)
-            market: E(场内) / O(场外)，可选
-        """
+Args:
+    ts_code: 基金代码，如 '510300.SH'、'000001.OF'
+    start_date: 开始日期(YYYYMMDD)
+    end_date: 结束日期(YYYYMMDD)
+    market: E(场内) / O(场外)，可选
+    as_file: 为 True 时把完整净值序列写成 .jsonl 文件
+    include_ui: 为 False 时不附加内嵌净值曲线 UI
+""" + AS_FILE_INCLUDE_UI_DECISION_GUIDE
         try:
             if not api.is_available():
                 return {"success": False, "error": "数据服务不可用（Pro 接口未配置）"}
@@ -257,13 +263,14 @@ def register_fund_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat(),
             }
             result = merge_large_data_payload(result, large_payload)
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/fund-nav-chart",
-                items_path="data",
-                items_count=len(data),
-                truncated=bool("is_truncated" in large_payload),
-                data_resource_uri=large_payload.get("resource_uri") if "is_truncated" in large_payload else None,
+            return finalize_artifact_result(
+                rows=data,
+                result=result,
+                tool_name="get_fund_nav",
+                query_params=kwargs,
+                ui_uri="ui://findata/fund-nav-chart",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:

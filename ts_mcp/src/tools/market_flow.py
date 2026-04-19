@@ -13,6 +13,7 @@ from fastmcp.server.apps import AppConfig
 from ..cache import cache
 from ..utils.tushare_api import TushareAPI
 from ..utils.ui_hint import attach_hint_to_dict, build_ui_hint as build_ui_hint_local
+from ..utils.artifact_payload import finalize_artifact_result, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 
 DATA_TABLE_APP = AppConfig(
     resource_uri="ui://findata/data-table",
@@ -27,7 +28,9 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
     async def get_sector_top_stocks(
         sector_name: str,
         limit: int = 10,
-        date: Optional[str] = None
+        date: Optional[str] = None,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         获取某行业/板块的龙头股列表（按市值排序）
@@ -213,7 +216,7 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
 
             codes_only = [item['ts_code'] for item in result_list]
 
-            return {
+            _sector_result = {
                 "success": True,
                 "sector_name": sector_name,
                 "data_source": data_source,
@@ -223,11 +226,6 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
                 "codes": codes_only,
                 "limit": limit,
                 "timestamp": datetime.now().isoformat(),
-                "_llm_hint": build_ui_hint_local(
-                    "ui://findata/data-table",
-                    items_path="data",
-                    items_count=len(result_list),
-                ),
                 # P1-4: 添加 next_action 提示
                 "next_actions": {
                     "analyze_performance": {
@@ -247,6 +245,15 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
                     }
                 }
             }
+            return finalize_artifact_result(
+                rows=result_list,
+                result=_sector_result,
+                tool_name="get_sector_top_stocks",
+                query_params={"sector_name": sector_name, "limit": limit, "date": date},
+                ui_uri="ui://findata/data-table",
+                as_file=as_file,
+                include_ui=include_ui,
+            )
 
         except Exception as e:
             return {
@@ -256,7 +263,7 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
             }
 
     @mcp.tool(tags={"行业板块"}, app=DATA_TABLE_APP)
-    async def get_top_list(trade_date: str, market_type: str = "SH") -> Dict[str, Any]:
+    async def get_top_list(trade_date: str, market_type: str = "SH", as_file: bool = False, include_ui: bool = True) -> Dict[str, Any]:
         """
         获取龙虎榜数据
 
@@ -299,8 +306,9 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
 
             data = df.to_dict('records')
 
-            return attach_hint_to_dict(
-                {
+            return finalize_artifact_result(
+                rows=data,
+                result={
                     "success": True,
                     "trade_date": trade_date,
                     "market_type": market_type,
@@ -308,9 +316,11 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
                     "data": data,
                     "timestamp": datetime.now().isoformat(),
                 },
-                "ui://findata/data-table",
-                items_path="data",
-                items_count=len(data),
+                tool_name="get_top_list",
+                query_params={"trade_date": trade_date, "market_type": market_type},
+                ui_uri="ui://findata/data-table",
+                as_file=as_file,
+                include_ui=include_ui,
             )
         except Exception as e:
             return {

@@ -550,18 +550,23 @@ Args:
         ts_code: str,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        as_file: bool = False,
+        include_ui: bool = True,
         stock_code: Optional[str] = None,  # 兼容旧参数名
         code: Optional[str] = None  # 兼容 code 别名
     ) -> Union[ToolResult, Dict[str, Any]]:
-        """获取个股资金流向（主力/散户净流入，仅A股）
+        """获取个股资金流向（主力/散户净流入，仅A股）。
+返回形态（默认）：内嵌资金流向 UI（ui://findata/moneyflow-chart）+ 结构化数据预览。
 
-        Args:
-            ts_code: A股代码，支持 '600519.SH' 或 '600519'
-            start_date: 开始日期(YYYYMMDD)，默认最近30天
-            end_date: 结束日期(YYYYMMDD)，默认今天
-            stock_code: ts_code 的别名
-            code: ts_code 的别名
-        """
+Args:
+    ts_code: A股代码，支持 '600519.SH' 或 '600519'
+    start_date: 开始日期(YYYYMMDD)，默认最近30天
+    end_date: 结束日期(YYYYMMDD)，默认今天
+    as_file: 为 True 时把完整数据写成 .jsonl 文件
+    include_ui: 为 False 时不附加 ui:// 内嵌 UI
+    stock_code: ts_code 的别名
+    code: ts_code 的别名
+""" + AS_FILE_INCLUDE_UI_DECISION_GUIDE
         try:
             # 兼容旧参数名
             ts_code = ts_code or stock_code or code or ""
@@ -619,18 +624,25 @@ Args:
             _net_total = sum((r.get("net_mf_amount") or 0) for r in data) / 100000  # 亿
             _net_sign = "+" if _net_total >= 0 else ""
             _summary = f"{ts_code} 资金流向: {start_date}~{end_date}, {len(data)}个交易日, 净流入{_net_sign}{_net_total:.2f}亿"
-            _data_uri = large_payload.get("resource_uri") if "is_truncated" in large_payload else None
-            _summary = append_hint_to_summary(
-                _summary,
-                "ui://findata/moneyflow-chart",
-                items_path="data",
-                items_count=len(ui_rows),
-                truncated=bool("is_truncated" in large_payload),
-                data_resource_uri=_data_uri,
+
+            _artifact = build_artifact_fields(
+                data,
+                tool_name="get_moneyflow",
+                query_params={"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
+                ui_uri="ui://findata/moneyflow-chart",
+                as_file=as_file,
+                include_ui=include_ui,
             )
+            _meta_override = _artifact.pop("_meta_override", None)
+            _hint = _artifact.pop("_llm_hint", "")
+            structured.update(_artifact)
+            structured["_llm_hint"] = _hint
+            _summary = f"{_summary}\n\n{_hint}" if _hint else _summary
+
             return ToolResult(
                 content=[TextContent(type="text", text=_summary)],
                 structured_content=structured,
+                meta=_meta_override,
             )
         except Exception as e:
             return {

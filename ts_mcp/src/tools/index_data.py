@@ -16,6 +16,7 @@ from ..cache import cache
 from ..utils.tushare_api import TushareAPI
 from ..utils.large_data_handler import handle_large_data, merge_large_data_payload, prepare_large_data_view
 from ..utils.ui_hint import attach_hint_to_dict
+from ..utils.artifact_payload import finalize_artifact_result, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 from .constants import READONLY_ANNOTATIONS
 
 logger = logging.getLogger(__name__)
@@ -163,16 +164,21 @@ def register_index_tools(mcp: FastMCP, api: TushareAPI):
         code: str = "",
         trade_date: Optional[str] = None,
         start_date: Optional[str] = None,
-        end_date: Optional[str] = None
+        end_date: Optional[str] = None,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
-        """获取指数估值数据（PE/PB/换手率/市值，支持宽基和申万指数）
+        """获取指数估值数据（PE/PB/换手率/市值，支持宽基和申万指数）。
+返回形态（默认）：内嵌估值曲线 UI（ui://findata/series-chart）+ 结构化数据预览。
 
-        Args:
-            ts_code: 指数代码，如 '000300.SH'(沪深300)、'801010.SI'(申万农林牧渔)
-            trade_date: 交易日期(YYYYMMDD)
-            start_date: 开始日期(YYYYMMDD)
-            end_date: 结束日期(YYYYMMDD)
-        """
+Args:
+    ts_code: 指数代码，如 '000300.SH'(沪深300)、'801010.SI'(申万农林牧渔)
+    trade_date: 交易日期(YYYYMMDD)
+    start_date: 开始日期(YYYYMMDD)
+    end_date: 结束日期(YYYYMMDD)
+    as_file: 为 True 时把完整估值序列写成 .jsonl 文件
+    include_ui: 为 False 时不附加内嵌估值曲线 UI
+""" + AS_FILE_INCLUDE_UI_DECISION_GUIDE
         try:
             if not api.is_available():
                 return {"success": False, "error": "数据服务不可用（Pro 接口未配置）"}
@@ -237,13 +243,14 @@ def register_index_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
             result = merge_large_data_payload(result, large_payload)
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/series-chart",
-                items_path="data",
-                items_count=len(data),
-                truncated=bool("is_truncated" in large_payload),
-                data_resource_uri=large_payload.get("resource_uri") if "is_truncated" in large_payload else None,
+            return finalize_artifact_result(
+                rows=data,
+                result=result,
+                tool_name="get_index_valuation",
+                query_params={"ts_code": ts_code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date},
+                ui_uri="ui://findata/series-chart",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:

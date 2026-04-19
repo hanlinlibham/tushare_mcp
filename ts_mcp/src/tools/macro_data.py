@@ -28,6 +28,7 @@ from ..utils.response import build_success_response, build_error_response, build
 from ..utils.errors import ErrorCode
 from ..utils.large_data_handler import merge_large_data_payload, prepare_large_data_view
 from ..utils.ui_hint import append_hint_to_summary, attach_hint_to_dict, build_ui_hint
+from ..utils.artifact_payload import finalize_artifact_result, build_artifact_fields, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,10 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     """注册宏观数据工具"""
 
     @mcp.tool(tags={"宏观数据"}, app=MACRO_PANEL_APP)
-    async def get_macro_summary() -> Union[ToolResult, Dict[str, Any]]:
+    async def get_macro_summary(
+        as_file: bool = False,
+        include_ui: bool = True,
+    ) -> Union[ToolResult, Dict[str, Any]]:
         """
         【宏观概览】一次调用获取最新的关键宏观经济指标
 
@@ -372,14 +376,29 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
 
-            summary = append_hint_to_summary(
-                summary,
-                "ui://findata/macro-panel",
-                items_path="data",
+            # 扁平化指标快照作为 rows（每个指标一行），便于 as_file 输出
+            snapshot_rows = [
+                {"indicator": k, **(v if isinstance(v, dict) else {"value": v})}
+                for k, v in result.items() if v is not None
+            ]
+            _artifact = build_artifact_fields(
+                snapshot_rows,
+                tool_name="get_macro_summary",
+                query_params={},
+                ui_uri="ui://findata/macro-panel",
+                as_file=as_file,
+                include_ui=include_ui,
             )
+            _meta_override = _artifact.pop("_meta_override", None)
+            _hint = _artifact.pop("_llm_hint", "")
+            structured.update(_artifact)
+            structured["_llm_hint"] = _hint
+            summary = f"{summary}\n\n{_hint}" if _hint else summary
+
             return ToolResult(
                 content=[TextContent(type="text", text=summary)],
                 structured_content=structured,
+                meta=_meta_override,
             )
 
         except Exception as e:
@@ -390,7 +409,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     async def get_gdp_data(
         start_q: Optional[str] = None,
         end_q: Optional[str] = None,
-        limit: int = 8
+        limit: int = 8,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         【GDP数据】获取中国季度GDP及分产业数据
@@ -507,12 +528,14 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
             result = merge_large_data_payload(result, large_payload)
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/series-chart",
-                items_path="data",
-                truncated=bool("is_truncated" in large_payload),
-                data_resource_uri=large_payload.get("resource_uri") if "is_truncated" in large_payload else None,
+            return finalize_artifact_result(
+                rows=data,
+                result=result,
+                tool_name="get_gdp_data",
+                query_params=kwargs,
+                ui_uri="ui://findata/series-chart",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:
@@ -523,7 +546,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     async def get_cpi_data(
         start_m: Optional[str] = None,
         end_m: Optional[str] = None,
-        limit: int = 12
+        limit: int = 12,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         【CPI数据】获取中国居民消费价格指数
@@ -646,12 +671,14 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
             result = merge_large_data_payload(result, large_payload)
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/series-chart",
-                items_path="data",
-                truncated=bool("is_truncated" in large_payload),
-                data_resource_uri=large_payload.get("resource_uri") if "is_truncated" in large_payload else None,
+            return finalize_artifact_result(
+                rows=data,
+                result=result,
+                tool_name="get_cpi_data",
+                query_params=kwargs,
+                ui_uri="ui://findata/series-chart",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:
@@ -662,7 +689,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     async def get_pmi_data(
         start_m: Optional[str] = None,
         end_m: Optional[str] = None,
-        limit: int = 12
+        limit: int = 12,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         【PMI数据】获取中国采购经理指数
@@ -785,12 +814,14 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
             result = merge_large_data_payload(result, large_payload)
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/series-chart",
-                items_path="data",
-                truncated=bool("is_truncated" in large_payload),
-                data_resource_uri=large_payload.get("resource_uri") if "is_truncated" in large_payload else None,
+            return finalize_artifact_result(
+                rows=data,
+                result=result,
+                tool_name="get_pmi_data",
+                query_params=kwargs,
+                ui_uri="ui://findata/series-chart",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:
@@ -801,7 +832,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     async def get_money_supply(
         start_m: Optional[str] = None,
         end_m: Optional[str] = None,
-        limit: int = 12
+        limit: int = 12,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         【货币供应量】获取M0/M1/M2数据
@@ -949,12 +982,14 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
             result = merge_large_data_payload(result, large_payload)
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/series-chart",
-                items_path="data",
-                truncated=bool("is_truncated" in large_payload),
-                data_resource_uri=large_payload.get("resource_uri") if "is_truncated" in large_payload else None,
+            return finalize_artifact_result(
+                rows=data,
+                result=result,
+                tool_name="get_money_supply",
+                query_params=kwargs,
+                ui_uri="ui://findata/series-chart",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:
@@ -965,7 +1000,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     async def get_interest_rates(
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        limit: int = 30
+        limit: int = 30,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         【利率数据】获取SHIBOR和LPR利率
@@ -1054,7 +1091,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
 
             lpr_latest = result.get("lpr_latest") or {}
             shibor_latest = result.get("shibor_latest") or {}
-            return {
+            _return_body = {
                 "success": True,
                 "data": result,
                 "ui": _build_series_ui(
@@ -1100,10 +1137,22 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                     }
                 },
                 "timestamp": datetime.now().isoformat(),
-                "_llm_hint": build_ui_hint(
-                    "ui://findata/series-chart", items_path="data"
-                ),
             }
+            # 合并 LPR + SHIBOR 行作为 as_file 的统一 rows
+            _ir_rows = []
+            for r in (result.get("lpr") or []):
+                _ir_rows.append({"source": "lpr", **r})
+            for r in (result.get("shibor") or []):
+                _ir_rows.append({"source": "shibor", **r})
+            return finalize_artifact_result(
+                rows=_ir_rows,
+                result=_return_body,
+                tool_name="get_interest_rates",
+                query_params={"start_date": start_date, "end_date": end_date, "limit": limit},
+                ui_uri="ui://findata/series-chart",
+                as_file=as_file,
+                include_ui=include_ui,
+            )
 
         except Exception as e:
             logger.error(f"❌ get_interest_rates error: {e}")
@@ -1113,7 +1162,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
     async def get_ppi_data(
         start_m: Optional[str] = None,
         end_m: Optional[str] = None,
-        limit: int = 12
+        limit: int = 12,
+        as_file: bool = False,
+        include_ui: bool = True,
     ) -> Dict[str, Any]:
         """
         【PPI数据】获取工业品出厂价格指数
@@ -1227,12 +1278,14 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
             result = merge_large_data_payload(result, large_payload)
-            return attach_hint_to_dict(
-                result,
-                "ui://findata/series-chart",
-                items_path="data",
-                truncated=bool("is_truncated" in large_payload),
-                data_resource_uri=large_payload.get("resource_uri") if "is_truncated" in large_payload else None,
+            return finalize_artifact_result(
+                rows=data,
+                result=result,
+                tool_name="get_ppi_data",
+                query_params=kwargs,
+                ui_uri="ui://findata/series-chart",
+                as_file=as_file,
+                include_ui=include_ui,
             )
 
         except Exception as e:
