@@ -480,6 +480,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                     {"metric": k, **(v if isinstance(v, dict) else {"value": v})}
                     for k, v in result["metrics"].items()
                 ]
+                _header = f"{ts_code} 财务指标 | period={period} calc={calc_type} | {len(_fm_rows)} 个指标"
                 return finalize_artifact_result(
                     rows=_fm_rows,
                     result=result,
@@ -488,6 +489,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                     ui_uri="ui://findata/financial-metrics-chart",
                     as_file=as_file,
                     include_ui=include_ui,
+                    header_text=_header,
                 )
             else:
                 return {
@@ -816,6 +818,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                 if isinstance(inner, dict):
                     for b, val in inner.items():
                         _corr_rows.append({"stock_a": a, "stock_b": b, "correlation": val})
+            _header = f"相关性分析 | {len(stock_names)} 个标的 × {start_date}~{end_date} | {len(_corr_rows)} 对"
             return finalize_artifact_result(
                 rows=_corr_rows,
                 result=result,
@@ -824,6 +827,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/correlation-matrix",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=_header,
             )
 
         except Exception as e:
@@ -1366,6 +1370,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                 if isinstance(inner, dict):
                     for b, val in inner.items():
                         _corr_rows.append({"stock_a": a, "stock_b": b, "correlation": val})
+            _header = f"{metric} 相关性矩阵 | {len(ts_codes_list)} 个标的 × {start_date}~{end_date} | {len(_corr_rows)} 对"
             return finalize_artifact_result(
                 rows=_corr_rows,
                 result=result,
@@ -1374,6 +1379,7 @@ def register_analysis_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/correlation-matrix",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=_header,
             )
 
         except Exception as e:

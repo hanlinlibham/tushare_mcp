@@ -1,10 +1,15 @@
-"""带 UI resource 的 MCP 工具统一 payload 构造器
+"""MCP 工具 envelope 统一构造器（v3：content-first，去混淆）
 
-支持 as_file / include_ui 两个语义开关，四种组合行为：
-  as_file=False, include_ui=True  → 原默认：UI iframe + structuredContent preview
-  as_file=True,  include_ui=True  → UI + .jsonl 文件 path
-  as_file=True,  include_ui=False → 只 .jsonl 文件，无 UI
-  as_file=False, include_ui=False → 只 preview，无 UI 无文件
+核心契约：
+  - content[0].text  = LLM 唯一可信信道：header 摘要 + markdown 表格 + 引导
+  - structuredContent = 机器读的数据层（rows 单源、columns 带 type、path 可选）
+    不放 hint、不放引用路径、不放副本。
+
+四种组合（as_file, include_ui）行为不变：
+  F, T → UI + text 内联 markdown 表格（前 N 行）
+  T, T → UI + text 表格 + path
+  T, F → 无 UI + text 表格 + path（ToolResult.meta={ui: None}）
+  F, F → 无 UI + text 表格
 """
 
 from __future__ import annotations
@@ -19,7 +24,6 @@ from ..cache.data_file_store import data_file_store, infer_schema
 
 
 def _safe_name(s: str) -> str:
-    """文件名安全化：非字母数字/./-/_ 替为下划线。"""
     return re.sub(r"[^0-9A-Za-z_.-]", "_", s).strip("_.") or "data"
 
 
@@ -30,10 +34,7 @@ _FILENAME_PRIORITY_KEYS = (
 
 
 def build_semantic_filename(tool_name: str, query_params: Dict[str, Any]) -> str:
-    """语义化文件名：tool_name + 关键参数 + 日期范围。带 .jsonl 扩展。
-
-    例：get_historical_data_600519.SH_20240101_20240331.jsonl
-    """
+    """tool_name + 关键参数 + 日期范围 → .jsonl。"""
     parts: List[str] = [_safe_name(tool_name)]
     for k in _FILENAME_PRIORITY_KEYS:
         v = query_params.get(k)
@@ -43,46 +44,69 @@ def build_semantic_filename(tool_name: str, query_params: Dict[str, Any]) -> str
     return "_".join(parts) + ".jsonl"
 
 
-def build_preview(rows: List[Dict[str, Any]], limit: int = 20) -> List[Dict[str, Any]]:
-    """前 limit 行预览，永远返回 list of dict（不转 CSV 字符串）。"""
-    if not rows:
-        return []
-    if len(rows) <= limit:
-        return list(rows)
-    return list(rows[:limit])
+def build_columns_typed(
+    rows: List[Dict[str, Any]], column_names: List[str]
+) -> List[Dict[str, str]]:
+    """[{name, type}] 格式（合并原 columns list + schema dict）。"""
+    schema = infer_schema(rows, column_names)
+    return [{"name": c, "type": schema[c]["type"]} for c in column_names]
 
 
-def build_llm_hint(
+def _fmt_cell(v: Any) -> str:
+    if v is None:
+        return "—"
+    if isinstance(v, float):
+        s = f"{v:.4f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+    return str(v)
+
+
+def render_markdown_table(
+    rows: List[Dict[str, Any]],
+    columns_typed: List[Dict[str, str]],
+    limit: int = 10,
+) -> str:
+    """前 limit 行渲染为 markdown 表格。空表返回空串。"""
+    if not rows or not columns_typed:
+        return ""
+    names = [c["name"] for c in columns_typed]
+    header = "| " + " | ".join(names) + " |"
+    sep = "|" + "|".join([" --- "] * len(names)) + "|"
+    body = "\n".join(
+        "| " + " | ".join(_fmt_cell(r.get(n)) for n in names) + " |"
+        for r in rows[:limit]
+    )
+    return f"{header}\n{sep}\n{body}"
+
+
+def build_content_trailer(
     *,
     ui_uri: Optional[str],
     row_count: int,
+    rows_shown: int,
     path: Optional[str],
+    include_ui: bool,
 ) -> str:
-    """按 as_file / include_ui 四种组合给 agent 不同的下一步引导。"""
-    if ui_uri and not path:
-        return (
-            f"📊 已渲染到前端: {ui_uri}\n"
-            f"📦 数据预览: structuredContent.rows_preview（共 {row_count} 行，前 20 行）\n"
-            f"💡 如需完整数据文件做后续分析/导出，重新调用并设 as_file=True"
-        )
-    if ui_uri and path:
-        return (
-            f"📊 已渲染到前端: {ui_uri}\n"
-            f"📁 完整数据文件: {path}（共 {row_count} 行）\n"
-            f"💡 用户可在 artifact 面板打开此文件交互查看；你也可以用 execute 工具读此文件做进一步分析"
-        )
-    if (ui_uri is None) and path:
-        return (
-            f"📁 数据文件已写入: {path}（共 {row_count} 行）\n"
-            f"💡 无内嵌 UI。你可以用 execute + matplotlib/plotly 绘图，或直接返回文件让用户在 artifact 面板查看"
-        )
-    return (
-        f"📦 数据预览: structuredContent.rows_preview（共 {row_count} 行）\n"
-        f"💡 无 UI 也无文件。如需完整数据，重新调用并设 as_file=True"
-    )
+    """content.text 尾部引导文案。不引用 structuredContent 字段路径。"""
+    lines: List[str] = []
+    if ui_uri and include_ui:
+        lines.append(f"📊 UI 已同步渲染（{ui_uri}）。")
+    if path:
+        lines.append(f"📁 完整 {row_count} 行数据已写入 {path}。")
+        if include_ui:
+            lines.append("用户可在 artifact 面板打开此文件交互查看；你也可以用 execute 读此文件做进一步分析。")
+        else:
+            lines.append("无内嵌 UI。你可以用 execute + matplotlib/plotly 绘图，或直接让用户在 artifact 面板查看此文件。")
+    elif row_count == 0:
+        lines.append("无数据。")
+    elif row_count > rows_shown:
+        lines.append(f"上方表格仅显示前 {rows_shown} 行（共 {row_count} 行）。需要完整数据做文件导出或脚本处理时，重新调用并设 as_file=True。")
+    else:
+        lines.append("当前数据已内嵌上方表格，够回答大部分问题时直接答。需要把数据落成文件做后续处理时，重新调用并设 as_file=True。")
+    return "\n".join(lines)
 
 
-def build_artifact_fields(
+def build_artifact_envelope(
     rows: List[Dict[str, Any]],
     *,
     tool_name: str,
@@ -90,32 +114,44 @@ def build_artifact_fields(
     ui_uri: str,
     as_file: bool,
     include_ui: bool,
-    preview_limit: int = 20,
+    header_text: str = "",
+    max_rows_in_text: int = 10,
     filename: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """返回要合并进 structuredContent 的字段 + hint + meta override。
+    """生成 envelope 各部件。
 
-    返回 dict 的 keys（消费方自行拼装 ToolResult / dict 返回）：
-        row_count       : int
-        columns         : list[str]
-        rows_preview    : list[dict]  ≤ preview_limit 行
-        schema          : {col: {type: date|string|number|bool}}
-        path            : str         仅 as_file=True；形如 /workspace/xxx.jsonl
-        download_urls   : dict        仅 as_file=True；{jsonl, json} HTTP URL
-        _llm_hint       : str         下一步引导文案
-        _meta_override  : dict | None include_ui=False 时 {'ui': None}（供调用方给 ToolResult(meta=...)）
+    返回：
+        # structuredContent 字段（调用方 .update 进去）
+        row_count    : int
+        columns      : list[{name, type}]
+        rows         : list[dict]        唯一数据源（完整数据）
+        date_range   : [min, max] | 缺省 （当且仅当有 date 列）
+        path         : str               仅 as_file=True
+        download_urls: dict              仅 as_file=True
+
+        # 以下字段由调用方消费，不进 structuredContent
+        _content_text  : str             content[0].text 全文
+        _meta_override : dict | None     ToolResult.meta（include_ui=False 时 {'ui': None}）
     """
-    columns = list(rows[0].keys()) if rows else []
-    schema = infer_schema(rows, columns)
-    preview = build_preview(rows, preview_limit)
+    column_names = list(rows[0].keys()) if rows else []
+    columns_typed = build_columns_typed(rows, column_names)
     row_count = len(rows)
 
     fields: Dict[str, Any] = {
         "row_count": row_count,
-        "columns": columns,
-        "rows_preview": preview,
-        "schema": schema,
+        "columns": columns_typed,
+        "rows": list(rows),
     }
+
+    # date_range：选第一个识别为 date 的列
+    date_col = next((c["name"] for c in columns_typed if c["type"] == "date"), None)
+    if date_col and rows:
+        vals = [r[date_col] for r in rows if r.get(date_col) is not None]
+        if vals:
+            try:
+                fields["date_range"] = [min(vals), max(vals)]
+            except TypeError:
+                pass
 
     path: Optional[str] = None
     if as_file and rows:
@@ -126,14 +162,34 @@ def build_artifact_fields(
         fields["path"] = path
         fields["download_urls"] = urls
 
-    fields["_llm_hint"] = build_llm_hint(
-        ui_uri=ui_uri if include_ui else None,
+    table_md = render_markdown_table(rows, columns_typed, limit=max_rows_in_text)
+    trailer = build_content_trailer(
+        ui_uri=ui_uri,
         row_count=row_count,
+        rows_shown=min(row_count, max_rows_in_text),
         path=path,
+        include_ui=include_ui,
     )
-    # 给调用方的 meta override：include_ui=False 时让 ToolResult 显式塞 {'ui': None}
+    parts: List[str] = []
+    if header_text:
+        parts.append(header_text.rstrip())
+    if table_md:
+        parts.append(table_md)
+    if trailer:
+        parts.append(trailer)
+    fields["_content_text"] = "\n\n".join(parts)
     fields["_meta_override"] = {"ui": None} if not include_ui else None
     return fields
+
+
+# 历史上留下来的字段，新 envelope 契约下统一剔除
+_LEGACY_STRUCTURED_KEYS = (
+    "rows_preview", "_llm_hint", "schema",
+    "daily_data", "data_note", "items_note",
+    "items_truncated", "items_resource_uri",
+    "preview", "data_id", "resource_uri",
+    "expires_in", "is_truncated",
+)
 
 
 def finalize_artifact_result(
@@ -145,52 +201,83 @@ def finalize_artifact_result(
     ui_uri: str,
     as_file: bool,
     include_ui: bool,
-    summary_text: Optional[str] = None,
-    preview_limit: int = 20,
+    header_text: str = "",
+    max_rows_in_text: int = 10,
     filename: Optional[str] = None,
-) -> Union[ToolResult, Dict[str, Any]]:
-    """把 artifact fields merge 进 result dict，按 include_ui 决定返回形态。
+) -> ToolResult:
+    """统一 envelope 出口 —— 始终返回 ToolResult 以控制 content.text。
 
-    - include_ui=True  → 直接返回 dict（保留工具既有返回类型，fastmcp 会自动包装）
-    - include_ui=False → 返回 ToolResult(meta={'ui': None}) 携带覆盖信号
-
-    在 result 上覆盖/追加：row_count, columns, rows_preview, schema, path（仅
-    as_file=True）, download_urls, _llm_hint。
+    - 清理 result 里的旧字段（rows_preview/_llm_hint/daily_data/...）
+    - 合入 row_count/columns/rows/date_range/path
+    - content[0].text = header + markdown table + trailer
+    - include_ui=False → meta={ui: None} 覆盖信号
     """
-    fields = build_artifact_fields(
+    env = build_artifact_envelope(
         rows,
         tool_name=tool_name,
         query_params=query_params,
         ui_uri=ui_uri,
         as_file=as_file,
         include_ui=include_ui,
-        preview_limit=preview_limit,
+        header_text=header_text,
+        max_rows_in_text=max_rows_in_text,
         filename=filename,
     )
-    meta_override = fields.pop("_meta_override", None)
-    hint = fields.pop("_llm_hint", "")
-    result.update(fields)
-    result["_llm_hint"] = hint
+    content_text = env.pop("_content_text", "")
+    meta_override = env.pop("_meta_override", None)
 
-    if meta_override is None:
-        return result
-    content = [TextContent(type="text", text=summary_text or hint or "")]
+    for k in _LEGACY_STRUCTURED_KEYS:
+        result.pop(k, None)
+    result.update(env)
+
     return ToolResult(
-        content=content,
+        content=[TextContent(type="text", text=content_text)],
         structured_content=result,
         meta=meta_override,
     )
 
 
+# 旧 API 保留兼容（以防有外部调用），内部全部迁到 build_artifact_envelope
+def build_artifact_fields(
+    rows: List[Dict[str, Any]],
+    *,
+    tool_name: str,
+    query_params: Dict[str, Any],
+    ui_uri: str,
+    as_file: bool,
+    include_ui: bool,
+    preview_limit: int = 20,  # 已忽略，保留签名兼容
+    filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    """【已废弃】保留签名兼容；新代码请用 build_artifact_envelope / finalize_artifact_result。
+
+    这个函数仍会返回若干字段，但会把 content_text/_llm_hint 的概念抽掉，
+    rows 是完整数据（以前是 preview）。
+    """
+    env = build_artifact_envelope(
+        rows,
+        tool_name=tool_name,
+        query_params=query_params,
+        ui_uri=ui_uri,
+        as_file=as_file,
+        include_ui=include_ui,
+        max_rows_in_text=10,
+        filename=filename,
+    )
+    env.pop("_content_text", None)
+    return env
+
+
 AS_FILE_INCLUDE_UI_DECISION_GUIDE = """
 
 【as_file / include_ui 决策指南】
-默认（as_file=False, include_ui=True）：用户只是"看看走势"，UI iframe 足以回答问题。
-何时设 as_file=True（把数据写成 .jsonl 文件）：
+默认（as_file=False, include_ui=True）：UI iframe + content.text 内联 markdown 表格，
+通常足以回答问题；不要重复调用。
+何时设 as_file=True（把完整数据写成 .jsonl 文件）：
   - 用户明确要求"保存 / 导出 / 下载"数据
-  - 你计划用 execute 工具对数据做自定义分析（聚合成月线、多标的对比、计算指标）
-  - 用户目标超出内嵌 UI 范围（5 年以上月线、多资产对比）
-  - 用户要求以表格形式查看并交互（排序、筛选）
+  - 你计划用 execute 工具对数据做自定义分析（聚合月线、多标的对比、计算指标等）
+  - 数据规模或维度超出内嵌 UI 范围
+  - 用户要求以表格形式交互（排序、筛选）
 何时设 include_ui=False（跳过内嵌 UI）：
   - 你已决定 as_file=True 并打算自己绘图——避免两张图混淆
   - 用户只需要数据做逻辑判断，不需要可视化

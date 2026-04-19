@@ -20,7 +20,7 @@ from ..cache import cache
 from ..utils.tushare_api import TushareAPI, fetch_daily_data
 from ..utils.large_data_handler import THRESHOLD, handle_large_data, merge_large_data_payload, prepare_large_data_view
 from ..utils.ui_hint import append_hint_to_summary
-from ..utils.artifact_payload import build_artifact_fields, AS_FILE_INCLUDE_UI_DECISION_GUIDE
+from ..utils.artifact_payload import finalize_artifact_result, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 from .constants import READONLY_ANNOTATIONS
 
 KLINE_CHART_APP = AppConfig(
@@ -417,67 +417,18 @@ Args:
                     end_date=end_date
                 )
 
-                if df is not None and not df.empty:
-                    df = df.sort_values('trade_date')
+                if df is None or df.empty:
+                    return {"success": False, "error": "无历史数据", "ts_code": ts_code}
 
-                    # 计算统计指标
-                    daily_data = {
-                        "data_count": len(df),
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "price_statistics": {
-                            "max_price": float(df['high'].max()),
-                            "min_price": float(df['low'].min()),
-                            "avg_price": round(float(df['close'].mean()), 2),
-                            "latest_price": float(df['close'].iloc[-1]),
-                            "price_volatility": round(float(df['pct_chg'].std()), 4) if len(df) > 1 else 0,
-                            "max_single_day_gain": float(df['pct_chg'].max()),
-                            "max_single_day_loss": float(df['pct_chg'].min())
-                        },
-                        "trend_statistics": {
-                            "total_change": round(float(((df['close'].iloc[-1] / _base_price(df)) - 1) * 100), 2) if len(df) > 0 else 0
-                        }
-                    }
+                df = df.sort_values('trade_date')
+                full_items = df.to_dict("records")
 
-                    full_items = df.to_dict("records")
-                    large_items = None
-                    if len(full_items) > THRESHOLD:
-                        inline_limit = max(1, min(max_rows, 120))
-                        large_items = handle_large_data(
-                            full_items,
-                            "get_historical_data",
-                            {
-                                "ts_code": ts_code,
-                                "start_date": start_date,
-                                "end_date": end_date,
-                                "days": days,
-                            },
-                            preview_rows=inline_limit,
-                            preview_mode="tail",
-                        )
+                # 概要（进 content.text 顶部，不重复进 structuredContent）
+                _latest = float(df['close'].iloc[-1])
+                _chg = round(float(((df['close'].iloc[-1] / _base_price(df)) - 1) * 100), 2) if len(df) > 0 else 0
+                _chg_s = f"+{_chg}%" if _chg >= 0 else f"{_chg}%"
+                _header = f"{ts_code} | {len(df)} 个交易日 | 最新 {_latest}, 区间 {_chg_s}"
 
-                    # P1-3: 默认不返回详细列表，减少返回体大小
-                    if include_items:
-                        inline_limit = max_rows
-                        if large_items and "is_truncated" in large_items:
-                            inline_limit = max(1, min(max_rows, 120))
-                        items_df = df.tail(inline_limit) if len(df) > inline_limit else df
-                        daily_data["items"] = items_df.to_dict("records")
-                        daily_data["items_truncated"] = len(df) > inline_limit
-                        if len(df) > inline_limit:
-                            note = f"仅内联最近 {inline_limit} 条，共 {len(df)} 条"
-                            if large_items and "is_truncated" in large_items:
-                                note += f"；完整数据请读取 {large_items['resource_uri']}"
-                            daily_data["items_note"] = note
-                        if large_items and "is_truncated" in large_items:
-                            daily_data["items_resource_uri"] = large_items["resource_uri"]
-                else:
-                    daily_data = {"error": "无历史数据"}
-            else:
-                daily_data = {"error": "数据服务不可用（Pro 接口未配置）"}
-
-            if daily_data and not daily_data.get("error"):
-                # 计算 asset_type
                 _market = api.get_market(ts_code)
                 if _market == "HK":
                     _asset_type = "hk"
@@ -488,22 +439,20 @@ Args:
                 else:
                     _asset_type = "stock"
 
+                # 扁平 structuredContent —— 数据层只放标识 + 参数 + 时间戳，rows/columns 由 helper 合并
                 structured = {
                     "success": True,
                     "ts_code": ts_code,
                     "asset_type": _asset_type,
-                    "daily_data": daily_data,
                     "days": days,
                     "start_date": start_date,
                     "end_date": end_date,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
                 }
-                if large_items and "is_truncated" in large_items:
-                    structured = merge_large_data_payload(structured, large_items)
 
-                # as_file / include_ui 分派 — 总是输出 rows_preview/schema，按需写文件与抑制 UI
-                _artifact = build_artifact_fields(
-                    full_items,
+                return finalize_artifact_result(
+                    rows=full_items,
+                    result=structured,
                     tool_name="get_historical_data",
                     query_params={
                         "ts_code": ts_code,
@@ -514,30 +463,11 @@ Args:
                     ui_uri="ui://findata/kline-chart",
                     as_file=as_file,
                     include_ui=include_ui,
-                )
-                _meta_override = _artifact.pop("_meta_override", None)
-                _hint = _artifact.pop("_llm_hint", "")
-                structured.update(_artifact)
-                structured["_llm_hint"] = _hint
-
-                _stats = daily_data.get("price_statistics", {})
-                _trend = daily_data.get("trend_statistics", {})
-                _chg = _trend.get("total_change", 0)
-                _chg_s = f"+{_chg}%" if _chg >= 0 else f"{_chg}%"
-                _summary = f"{ts_code}: 最新{_stats.get('latest_price','-')}, 区间{_chg_s}, 最高{_stats.get('max_price','-')}, 最低{_stats.get('min_price','-')}, {daily_data.get('data_count',0)}个交易日"
-                _summary = f"{_summary}\n\n{_hint}" if _hint else _summary
-
-                return ToolResult(
-                    content=[TextContent(type="text", text=_summary)],
-                    structured_content=structured,
-                    meta=_meta_override,
+                    header_text=_header,
+                    max_rows_in_text=min(max_rows, 10),
                 )
             else:
-                return {
-                    "success": False,
-                    "error": daily_data.get("error", "无法获取历史数据"),
-                    "ts_code": ts_code
-                }
+                return {"success": False, "error": "数据服务不可用（Pro 接口未配置）", "ts_code": ts_code}
         except Exception as e:
             return {
                 "success": False,
@@ -600,49 +530,26 @@ Args:
             df = df.sort_values('trade_date')
             data = df.to_dict('records')
 
-            large_payload, _, ui_rows = prepare_large_data_view(
-                data,
-                "get_moneyflow",
-                {"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
-                preview_rows=30,
-                preview_mode="tail",
-            )
+            _net_total = sum((r.get("net_mf_amount") or 0) for r in data) / 100000  # 亿
+            _net_sign = "+" if _net_total >= 0 else ""
+            _header = f"{ts_code} 资金流向 | {start_date}~{end_date} | {len(data)} 个交易日 | 净流入 {_net_sign}{_net_total:.2f} 亿"
+
             structured = {
                 "success": True,
                 "ts_code": ts_code,
                 "start_date": start_date,
                 "end_date": end_date,
-                "count": len(data),
-                "data": ui_rows,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             }
-            structured = merge_large_data_payload(structured, large_payload)
-            if "is_truncated" in large_payload:
-                structured["data_note"] = f"图表内联 {len(ui_rows)} 条，完整数据请读取 {large_payload['resource_uri']}"
-
-            # Text summary for LLM
-            _net_total = sum((r.get("net_mf_amount") or 0) for r in data) / 100000  # 亿
-            _net_sign = "+" if _net_total >= 0 else ""
-            _summary = f"{ts_code} 资金流向: {start_date}~{end_date}, {len(data)}个交易日, 净流入{_net_sign}{_net_total:.2f}亿"
-
-            _artifact = build_artifact_fields(
-                data,
+            return finalize_artifact_result(
+                rows=data,
+                result=structured,
                 tool_name="get_moneyflow",
                 query_params={"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
                 ui_uri="ui://findata/moneyflow-chart",
                 as_file=as_file,
                 include_ui=include_ui,
-            )
-            _meta_override = _artifact.pop("_meta_override", None)
-            _hint = _artifact.pop("_llm_hint", "")
-            structured.update(_artifact)
-            structured["_llm_hint"] = _hint
-            _summary = f"{_summary}\n\n{_hint}" if _hint else _summary
-
-            return ToolResult(
-                content=[TextContent(type="text", text=_summary)],
-                structured_content=structured,
-                meta=_meta_override,
+                header_text=_header,
             )
         except Exception as e:
             return {

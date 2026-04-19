@@ -24,7 +24,7 @@ from ..utils.data_processing import adjust_date_to_trading_day, get_latest_tradi
 from ..utils.response import build_success_response, build_error_response, build_meta
 from ..utils.errors import ErrorCode
 from ..utils.ui_hint import append_hint_to_summary
-from ..utils.artifact_payload import build_artifact_fields, AS_FILE_INCLUDE_UI_DECISION_GUIDE
+from ..utils.artifact_payload import finalize_artifact_result, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 
 logger = logging.getLogger(__name__)
 
@@ -298,25 +298,16 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
 
-            # data 这里是聚合快照（dict），展平为 1 行给 as_file 用
             _ms_rows = [data] if isinstance(data, dict) else list(data or [])
-            _artifact = build_artifact_fields(
-                _ms_rows,
+            return finalize_artifact_result(
+                rows=_ms_rows,
+                result=structured,
                 tool_name="get_market_summary",
                 query_params={"trade_date": adjusted_date, "market": market, "include_st": include_st},
                 ui_uri="ui://findata/market-dashboard",
                 as_file=as_file,
                 include_ui=include_ui,
-            )
-            _meta_override = _artifact.pop("_meta_override", None)
-            _hint = _artifact.pop("_llm_hint", "")
-            structured.update(_artifact)
-            structured["_llm_hint"] = _hint
-            summary = f"{summary}\n\n{_hint}" if _hint else summary
-            return ToolResult(
-                content=[TextContent(type="text", text=summary)],
-                structured_content=structured,
-                meta=_meta_override,
+                header_text=summary,
             )
 
         except Exception as e:
@@ -759,23 +750,15 @@ def register_market_statistics_tools(mcp: FastMCP, api: TushareAPI):
                 "timestamp": datetime.now().isoformat()
             }
 
-            _artifact = build_artifact_fields(
-                results or [],
+            return finalize_artifact_result(
+                rows=results or [],
+                result=structured,
                 tool_name="get_batch_pct_chg",
                 query_params={"stock_codes": ",".join(stock_codes or []), "start_date": start_date, "end_date": adjusted_end},
                 ui_uri="ui://findata/data-table",
                 as_file=as_file,
                 include_ui=include_ui,
-            )
-            _meta_override = _artifact.pop("_meta_override", None)
-            _hint = _artifact.pop("_llm_hint", "")
-            structured.update(_artifact)
-            structured["_llm_hint"] = _hint
-            summary = f"{summary}\n\n{_hint}" if _hint else summary
-            return ToolResult(
-                content=[TextContent(type="text", text=summary)],
-                structured_content=structured,
-                meta=_meta_override,
+                header_text=summary,
             )
 
         except Exception as e:

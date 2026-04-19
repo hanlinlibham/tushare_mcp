@@ -381,24 +381,15 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 {"indicator": k, **(v if isinstance(v, dict) else {"value": v})}
                 for k, v in result.items() if v is not None
             ]
-            _artifact = build_artifact_fields(
-                snapshot_rows,
+            return finalize_artifact_result(
+                rows=snapshot_rows,
+                result=structured,
                 tool_name="get_macro_summary",
                 query_params={},
                 ui_uri="ui://findata/macro-panel",
                 as_file=as_file,
                 include_ui=include_ui,
-            )
-            _meta_override = _artifact.pop("_meta_override", None)
-            _hint = _artifact.pop("_llm_hint", "")
-            structured.update(_artifact)
-            structured["_llm_hint"] = _hint
-            summary = f"{summary}\n\n{_hint}" if _hint else summary
-
-            return ToolResult(
-                content=[TextContent(type="text", text=summary)],
-                structured_content=structured,
-                meta=_meta_override,
+                header_text=summary,
             )
 
         except Exception as e:
@@ -473,11 +464,10 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                     "ti_yoy": float(row.get('ti_yoy', 0))
                 })
 
-            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_gdp_data", kwargs)
+            ui_rows = data[-120:] if len(data) > 120 else data
             latest = data[0] if data else {}
             result = {
                 "success": True,
-                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="GDP 趋势",
                     subtitle=f"{len(data)} 个季度",
@@ -527,7 +517,6 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
-            result = merge_large_data_payload(result, large_payload)
             return finalize_artifact_result(
                 rows=data,
                 result=result,
@@ -536,6 +525,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/series-chart",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=f"GDP | {len(data)} 个季度 | 最新 {latest.get('quarter','-')} · GDP同比 {latest.get('gdp_yoy','-')}%",
             )
 
         except Exception as e:
@@ -618,10 +608,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "通胀压力"
             )
 
-            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_cpi_data", kwargs)
+            ui_rows = data[-120:] if len(data) > 120 else data
             result = {
                 "success": True,
-                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="CPI 趋势",
                     subtitle=f"{len(data)} 个月",
@@ -670,7 +659,6 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
-            result = merge_large_data_payload(result, large_payload)
             return finalize_artifact_result(
                 rows=data,
                 result=result,
@@ -679,6 +667,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/series-chart",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=f"CPI | {len(data)} 个月 | 最新 {latest.get('month','-')} · 同比 {latest.get('yoy','-')}%",
             )
 
         except Exception as e:
@@ -765,11 +754,10 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
             else:
                 trend = "数据不足"
 
-            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_pmi_data", kwargs)
+            ui_rows = data[-120:] if len(data) > 120 else data
             latest = data[0] if data else {}
             result = {
                 "success": True,
-                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="PMI 趋势",
                     subtitle=f"{len(data)} 个月",
@@ -813,7 +801,6 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
-            result = merge_large_data_payload(result, large_payload)
             return finalize_artifact_result(
                 rows=data,
                 result=result,
@@ -822,6 +809,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/series-chart",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=f"PMI | {len(data)} 个月 | 最新 {latest.get('month','-')} · 制造业 {latest.get('manufacturing_pmi','-')}",
             )
 
         except Exception as e:
@@ -924,10 +912,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 "流动性偏弱，资金观望为主"
             )
 
-            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_money_supply", kwargs)
+            ui_rows = data[-120:] if len(data) > 120 else data
             result = {
                 "success": True,
-                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="货币供应量",
                     subtitle=f"{len(data)} 个月",
@@ -981,7 +968,6 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
-            result = merge_large_data_payload(result, large_payload)
             return finalize_artifact_result(
                 rows=data,
                 result=result,
@@ -990,6 +976,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/series-chart",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=f"货币供应 | {len(data)} 个月 | 最新 {latest.get('month','-')} · M2同比 {latest.get('m2_yoy','-')}%",
             )
 
         except Exception as e:
@@ -1144,6 +1131,9 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 _ir_rows.append({"source": "lpr", **r})
             for r in (result.get("shibor") or []):
                 _ir_rows.append({"source": "shibor", **r})
+            _lpr_n = len(result.get("lpr") or [])
+            _shibor_n = len(result.get("shibor") or [])
+            _header = f"利率 | LPR {_lpr_n} 条 + SHIBOR {_shibor_n} 条 | 最新 LPR 1Y {lpr_latest.get('lpr_1y','-')}% / 5Y {lpr_latest.get('lpr_5y','-')}%"
             return finalize_artifact_result(
                 rows=_ir_rows,
                 result=_return_body,
@@ -1152,6 +1142,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/series-chart",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=_header,
             )
 
         except Exception as e:
@@ -1224,12 +1215,11 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                     "consumer_yoy": float(row.get('ppi_cg_yoy', 0))     # 生活资料
                 })
 
-            large_payload, inline_rows, ui_rows = _prepare_series_payload(data, "get_ppi_data", kwargs)
+            ui_rows = data[-120:] if len(data) > 120 else data
             latest = data[0] if data else {}
             interpretation = "工业品价格下跌，企业面临降价压力" if data and data[0]['ppi_yoy'] < 0 else "工业品价格上涨"
             result = {
                 "success": True,
-                "data": inline_rows,
                 "ui": _build_series_ui(
                     title="PPI 趋势",
                     subtitle=f"{len(data)} 个月",
@@ -1277,7 +1267,6 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 },
                 "timestamp": datetime.now().isoformat()
             }
-            result = merge_large_data_payload(result, large_payload)
             return finalize_artifact_result(
                 rows=data,
                 result=result,
@@ -1286,6 +1275,7 @@ def register_macro_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/series-chart",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=f"PPI | {len(data)} 个月 | 最新 {latest.get('month','-')} · 同比 {latest.get('yoy','-')}%",
             )
 
         except Exception as e:

@@ -245,6 +245,7 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
                     }
                 }
             }
+            _header = f"{sector_name} 行业龙头 | {data_source} | 前 {len(result_list)} 只"
             return finalize_artifact_result(
                 rows=result_list,
                 result=_sector_result,
@@ -253,6 +254,7 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
                 ui_uri="ui://findata/data-table",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=_header,
             )
 
         except Exception as e:
@@ -306,19 +308,19 @@ def register_market_flow_tools(mcp: FastMCP, api: TushareAPI):
 
             data = df.to_dict('records')
 
+            _header = f"龙虎榜 {trade_date} | {market_type}市场 | {len(data)} 条"
             return finalize_artifact_result(
                 rows=data,
                 result={
                     "success": True,
                     "trade_date": trade_date,
                     "market_type": market_type,
-                    "count": len(data),
-                    "data": data,
                     "timestamp": datetime.now().isoformat(),
                 },
                 tool_name="get_top_list",
                 query_params={"trade_date": trade_date, "market_type": market_type},
                 ui_uri="ui://findata/data-table",
+                header_text=_header,
                 as_file=as_file,
                 include_ui=include_ui,
             )

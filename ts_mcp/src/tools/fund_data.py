@@ -246,23 +246,16 @@ Args:
 
             df = df.sort_values("nav_date")
             data = df.to_dict("records")
-            large_payload, inline_rows, ui_rows = prepare_large_data_view(
-                data,
-                "get_fund_nav",
-                kwargs,
-                preview_rows=24,
-                preview_mode="tail",
-            )
+
+            _latest = data[-1] if data else {}
+            _header = f"{ts_code} 基金净值 | {len(data)} 条记录 | 最新 {_latest.get('nav_date','-')} 净值 {_latest.get('unit_nav','-')}"
 
             result = {
                 "success": True,
                 "ts_code": ts_code,
-                "count": len(data),
-                "data": inline_rows,
-                "ui": _build_fund_nav_ui(ts_code, ui_rows),
+                "ui": _build_fund_nav_ui(ts_code, data[-120:] if len(data) > 120 else data),
                 "timestamp": datetime.now().isoformat(),
             }
-            result = merge_large_data_payload(result, large_payload)
             return finalize_artifact_result(
                 rows=data,
                 result=result,
@@ -271,6 +264,7 @@ Args:
                 ui_uri="ui://findata/fund-nav-chart",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=_header,
             )
 
         except Exception as e:

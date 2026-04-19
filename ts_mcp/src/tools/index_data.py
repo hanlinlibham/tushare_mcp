@@ -227,22 +227,15 @@ Args:
             df = df.sort_values('trade_date')
             data = df.to_dict('records')
 
-            large_payload, inline_rows, ui_rows = prepare_large_data_view(
-                data,
-                "get_index_valuation",
-                {"ts_code": ts_code, "trade_date": trade_date, "start_date": start_date, "end_date": end_date},
-                preview_rows=24,
-                preview_mode="tail",
-            )
+            _latest = data[-1] if data else {}
+            _header = f"{ts_code} 指数估值 | {len(data)} 条记录 | 最新 {_latest.get('trade_date','-')} PE={_latest.get('pe','-')} PB={_latest.get('pb','-')}"
+
             result = {
                 "success": True,
                 "ts_code": ts_code,
-                "count": len(data),
-                "data": inline_rows,
-                "ui": _build_index_valuation_ui(ts_code, ui_rows),
+                "ui": _build_index_valuation_ui(ts_code, data[-120:] if len(data) > 120 else data),
                 "timestamp": datetime.now().isoformat()
             }
-            result = merge_large_data_payload(result, large_payload)
             return finalize_artifact_result(
                 rows=data,
                 result=result,
@@ -251,6 +244,7 @@ Args:
                 ui_uri="ui://findata/series-chart",
                 as_file=as_file,
                 include_ui=include_ui,
+                header_text=_header,
             )
 
         except Exception as e:
