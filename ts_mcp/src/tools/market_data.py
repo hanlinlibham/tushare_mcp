@@ -20,6 +20,7 @@ from ..cache import cache
 from ..utils.tushare_api import TushareAPI, fetch_daily_data
 from ..utils.large_data_handler import THRESHOLD, handle_large_data, merge_large_data_payload, prepare_large_data_view
 from ..utils.ui_hint import append_hint_to_summary
+from ..utils.artifact_payload import build_artifact_fields, AS_FILE_INCLUDE_UI_DECISION_GUIDE
 from .constants import READONLY_ANNOTATIONS
 
 KLINE_CHART_APP = AppConfig(
@@ -373,21 +374,26 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
         end_date: Optional[str] = None,
         include_items: bool = True,
         max_rows: int = 30,
+        as_file: bool = False,
+        include_ui: bool = True,
         stock_code: Optional[str] = None,  # 兼容旧参数名
         code: Optional[str] = None  # 兼容 code 别名
     ) -> Union[ToolResult, Dict[str, Any]]:
-        """获取股票/指数历史数据及统计指标（波动率、区间涨跌幅、价格区间）
+        """获取证券历史行情数据及统计指标（波动率、区间涨跌幅、价格区间）。
+返回形态（默认）：内嵌交互式 K 线 UI（ui://findata/kline-chart）+ 结构化数据预览。
 
-        Args:
-            ts_code: 股票或指数代码，支持 '600519.SH'、'00700.HK'、'AAPL'、'399001.SZ' 等
-            days: 获取天数，默认60，不传 start_date/end_date 时使用
-            start_date: 开始日期(YYYYMMDD)，优先级高于 days
-            end_date: 结束日期(YYYYMMDD)，默认今天
-            include_items: 是否返回每日明细，默认 True
-            max_rows: 明细最大行数，默认30
-            stock_code: ts_code 的别名
-            code: ts_code 的别名
-        """
+Args:
+    ts_code: 股票或指数代码，支持 '600519.SH'、'00700.HK'、'AAPL'、'399001.SZ' 等
+    days: 获取天数，默认60，不传 start_date/end_date 时使用
+    start_date: 开始日期(YYYYMMDD)，优先级高于 days
+    end_date: 结束日期(YYYYMMDD)，默认今天
+    include_items: 是否返回每日明细，默认 True
+    max_rows: 明细最大行数，默认30
+    as_file: 为 True 时把完整数据写成 .jsonl 文件，在 structuredContent 里返 path
+    include_ui: 为 False 时不附加 ui:// 内嵌 UI（用于 agent 自己绘图 / 避免重复展示）
+    stock_code: ts_code 的别名
+    code: ts_code 的别名
+""" + AS_FILE_INCLUDE_UI_DECISION_GUIDE
         try:
             # 兼容旧参数名
             ts_code = ts_code or stock_code or code or ""
@@ -494,33 +500,37 @@ def register_market_tools(mcp: FastMCP, api: TushareAPI):
                 }
                 if large_items and "is_truncated" in large_items:
                     structured = merge_large_data_payload(structured, large_items)
-                # Build text summary for LLM
+
+                # as_file / include_ui 分派 — 总是输出 rows_preview/schema，按需写文件与抑制 UI
+                _artifact = build_artifact_fields(
+                    full_items,
+                    tool_name="get_historical_data",
+                    query_params={
+                        "ts_code": ts_code,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "days": days,
+                    },
+                    ui_uri="ui://findata/kline-chart",
+                    as_file=as_file,
+                    include_ui=include_ui,
+                )
+                _meta_override = _artifact.pop("_meta_override", None)
+                _hint = _artifact.pop("_llm_hint", "")
+                structured.update(_artifact)
+                structured["_llm_hint"] = _hint
+
                 _stats = daily_data.get("price_statistics", {})
                 _trend = daily_data.get("trend_statistics", {})
                 _chg = _trend.get("total_change", 0)
                 _chg_s = f"+{_chg}%" if _chg >= 0 else f"{_chg}%"
                 _summary = f"{ts_code}: 最新{_stats.get('latest_price','-')}, 区间{_chg_s}, 最高{_stats.get('max_price','-')}, 最低{_stats.get('min_price','-')}, {daily_data.get('data_count',0)}个交易日"
-                _items_count = len(daily_data.get("items", []) or [])
-                _items_truncated = bool(daily_data.get("items_truncated", False))
-                _vol = _stats.get("price_volatility")
-                _max_up = _stats.get("max_single_day_gain")
-                _max_dn = _stats.get("max_single_day_loss")
-                _extra = None
-                if _vol is not None and _max_up is not None and _max_dn is not None:
-                    _extra = f"波动率{_vol}%, 最大单日涨+{_max_up}%/跌{_max_dn}%"
-                _data_uri = large_items.get("resource_uri") if (large_items and "is_truncated" in large_items) else None
-                _summary = append_hint_to_summary(
-                    _summary,
-                    "ui://findata/kline-chart",
-                    items_path="daily_data.items",
-                    items_count=_items_count,
-                    truncated=_items_truncated,
-                    extra_stats=_extra,
-                    data_resource_uri=_data_uri,
-                )
+                _summary = f"{_summary}\n\n{_hint}" if _hint else _summary
+
                 return ToolResult(
                     content=[TextContent(type="text", text=_summary)],
                     structured_content=structured,
+                    meta=_meta_override,
                 )
             else:
                 return {
