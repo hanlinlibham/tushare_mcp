@@ -13,6 +13,15 @@
 
 Formerly `tushare_mcp`; renamed to `findatamcp` after a modular refactor.
 
+## Why findatamcp
+
+When wiring LLM agents to financial data, the real bottlenecks aren't the data itself — they are two engineering problems that show up again and again:
+
+- **Tool descriptions blow out the system prompt.** Forty-two tools shipped up front cost thousands of tokens, and near-duplicates interfere with each other — the model picks wrong, then probes again. findatamcp uses **progressive disclosure** to keep the *default* visible surface at 3–8 tools (`get_tool_manifest` for the catalogue → `focus_category` to narrow → `show_all_tools` to expand).
+- **One tool call fills the context.** 2000 daily bars serialised as JSON is 30k+ tokens — one response and the conversation is done. findatamcp dispatches on a **200-row threshold**: above it you only get back `preview + summary + resource_uri`; the full data lives in a `.jsonl` artifact, pulled on demand.
+- **Data goes to both the model and the human.** The same `structuredContent` is piped through the MCP Apps spec into a sandboxed iframe and rendered as zoomable K-lines / dashboards / money-flow lines; the LLM sees only a markdown preview + guidance and won't loop "because it can't see the chart".
+- **Production details are baked in.** Zero CDN dependency (ECharts inlined locally), three-tier caching, async Tushare, PM2 supervision, HTTP artifact download routes, fuzzy entity search (pypinyin + aliases). Not a demo.
+
 ## Preview
 
 Structured tool results are shipped through MCP Apps (SEP-1865, protocol `2025-06-18`). The host renders a registered `ui://` resource inside a sandboxed iframe, while the LLM sees a concise markdown-table summary in `content[0].text` — so the same data reaches both the user and the model without duplication or re-invocation.
@@ -55,6 +64,44 @@ python -m findatamcp.server_sse          # SSE, for Claude Desktop et al.
 | `MCP_SERVER_HOST` | `127.0.0.1` | Bind address |
 | `MCP_SERVER_PORT` | `8006` | Port |
 | `SERVER_BASE_URL` | `http://127.0.0.1:8006` | External base URL for artifacts |
+
+## Client integration
+
+### Claude Desktop (SSE)
+
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "findatamcp": {
+      "transport": "sse",
+      "url": "http://127.0.0.1:8006/sse"
+    }
+  }
+}
+```
+
+Start the server with `python -m findatamcp.server_sse` or `./start_sse.sh`. After restarting Claude Desktop, findatamcp appears in the tools panel. On first use, call `get_tool_manifest` to see categories, then `focus_category` to narrow the surface.
+
+### Cursor / Continue.dev / VS Code MCP extensions
+
+Same SSE endpoint:
+
+```json
+{
+  "mcp.servers": {
+    "findatamcp": {
+      "url": "http://127.0.0.1:8006/sse",
+      "transport": "sse"
+    }
+  }
+}
+```
+
+### Custom agent (Python httpx)
+
+See [docs/SSE_GUIDE.md](docs/SSE_GUIDE.md) for a complete client example (handshake → sessionId → tool call).
 
 ## Layout
 
@@ -116,6 +163,17 @@ findatamcp/
 | `meta` | Metadata & capability discovery |
 
 Also exposed: resources (`entity_stats`, `large_data`, `stock_data`, `ui_apps`) and prompts (`stock_analysis`).
+
+## Use cases
+
+**① Desktop AI research workbench (Claude Desktop / Cursor)**
+Wire up the SSE endpoint and ask: "Pull CSI 300 daily bars for the past six months, overlay 5/20-day MAs." The tool does two things at once: the LLM gets a markdown summary — "120 trading days, +3.4% cumulative, 20-day MA sits at 4520" — while the artifact panel renders a zoomable chart with dual MAs and volume. Ask "which day closed highest" and the LLM answers from the summary without re-calling the tool.
+
+**② Internal asset-management / research data plane**
+Deploy findatamcp behind a firewall as the AI data engine. Analysts query financial statements, market breadth, or sector money flow through your internal agent. Over-threshold payloads are auto-dumped to `.jsonl` and exposed via the `/data/{id}.jsonl` download route for downstream risk / attribution systems, while `data://table/{id}` lets subsequent agent steps re-read the same data for further computation — all without round-tripping through memory.
+
+**③ Macro / sector dashboards, generated on demand**
+A daily-report workflow chains `get_macro_monthly_indicator` (GDP / CPI / PMI / M2 / LPR) + `get_sector_flow` + `get_market_overview`. The LLM drafts a market brief from the summaries while `ui://findata/macro-panel` renders a single interactive dashboard with multi-indicator lines and sector donut charts. No frontend code required.
 
 ---
 

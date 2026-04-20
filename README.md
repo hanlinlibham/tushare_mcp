@@ -13,6 +13,15 @@
 
 原名 `tushare_mcp`，重构后更名为 `findatamcp`，采用模块化包结构。
 
+## 为什么选 findatamcp
+
+LLM Agent 接金融数据，真正的瓶颈不是数据本身，而是两个反复出现的工程问题：
+
+- **工具描述把 system prompt 撑爆** —— 42 个工具一次性铺开轻松吃掉几千 token，近似工具还互相干扰，LLM 越选越错。findatamcp 用**渐进披露**把默认可见工具数量压到 3–8 个（`get_tool_manifest` 看目录 → `focus_category` 过滤 → `show_all_tools` 展开）。
+- **一次工具返回就把 context 塞满** —— 2000 行日线按 JSON 输出 30k+ token，一步之后对话就崩。findatamcp 走**200 行阈值分流**：超过阈值只回 `preview + summary + resource_uri`，完整数据落在 `.jsonl` artifact 里按需拉取。
+- **数据要给模型看，也要给用户看** —— 同一份 `structuredContent` 通过 MCP Apps 规范同步送到沙箱 iframe，渲染成可缩放的 K 线 / 仪表板 / 资金流；LLM 只看 markdown 预览和引导文案，不会因"看不到图"而重复调用。
+- **生产细节已就位** —— 零 CDN 依赖（ECharts 本地内联）、三层缓存、异步 Tushare 调用、PM2 守护、artifact HTTP 下载路由、实体模糊搜索（pypinyin + 别名），不是 demo 级别的拼装。
+
 ## 预览
 
 工具调用的结构化结果会通过 MCP Apps 规范（SEP-1865，protocol `2025-06-18`）回传 `ui://` 资源，客户端在沙箱 iframe 中渲染为交互组件；LLM 则通过 `content[0].text` 看到同一数据的 markdown 表格摘要，避免重复调用。
@@ -55,6 +64,44 @@ python -m findatamcp.server_sse          # SSE，配合 Claude Desktop 等
 | `MCP_SERVER_HOST` | `127.0.0.1` | 绑定地址 |
 | `MCP_SERVER_PORT` | `8006` | 端口 |
 | `SERVER_BASE_URL` | `http://127.0.0.1:8006` | artifact 外链基址 |
+
+## 客户端接入
+
+### Claude Desktop（SSE）
+
+`~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）或 `%APPDATA%\Claude\claude_desktop_config.json`（Windows）：
+
+```json
+{
+  "mcpServers": {
+    "findatamcp": {
+      "transport": "sse",
+      "url": "http://127.0.0.1:8006/sse"
+    }
+  }
+}
+```
+
+服务端跑 `python -m findatamcp.server_sse` 或 `./start_sse.sh`，重启 Claude Desktop 后在工具面板能看到 findatamcp。首次使用建议先调 `get_tool_manifest` 看分类，再 `focus_category` 聚焦。
+
+### Cursor / Continue.dev / VS Code MCP 插件
+
+同样走 SSE：
+
+```json
+{
+  "mcp.servers": {
+    "findatamcp": {
+      "url": "http://127.0.0.1:8006/sse",
+      "transport": "sse"
+    }
+  }
+}
+```
+
+### 自建 Agent（Python httpx 直连）
+
+见 [docs/SSE_GUIDE.md](docs/SSE_GUIDE.md) 里的完整客户端示例（建连 → 取 sessionId → 调 tool）。
 
 ## 目录结构
 
@@ -116,6 +163,17 @@ findatamcp/
 | `meta` | 元数据与能力发现 |
 
 同时暴露 resources（`entity_stats`、`large_data`、`stock_data`、`ui_apps`）和 prompts（`stock_analysis`）。
+
+## 典型场景
+
+**① 桌面端 AI 投研工作台（Claude Desktop / Cursor）**
+接入 SSE 端点后，直接在对话框里问："帮我拉沪深 300 过去半年日线，叠加 5/20 日均线"。工具返回同时做两件事：LLM 拿到 markdown 摘要知道"共 120 个交易日、涨幅 +3.4%、最近 20 日均线在 4520"，侧边栏 artifact 面板同步渲染可缩放的 K 线 + 双均线 + 成交量。问"哪天收盘最高"，LLM 不需要再调一次工具，已经在 summary 里看到。
+
+**② 内部资管 / 投研系统的数据中台**
+把 findatamcp 当作"AI 数据引擎"挂在公司内网，业务人员通过接入公司 Agent 问财务三表、全市场涨跌家数、板块资金流。超过 200 行的数据自动落 `.jsonl`，通过 `/data/{id}.jsonl` 下载路由直接对接下游风控 / 归因系统；`data://table/{id}` 又能让后续 Agent 步骤读取做二次计算，整链路不出内存。
+
+**③ 宏观 / 行业 Dashboard 自动生成**
+面向研究员的日报 / 周报工作流：Agent 串接 `get_macro_monthly_indicator`（GDP / CPI / PMI / M2 / LPR）+ `get_sector_flow` + `get_market_overview`，LLM 基于 summary 写市场速递，同时 `ui://findata/macro-panel` 直接渲染一张含多指标折线 + 环形占比的仪表板。前端无需额外开发。
 
 ---
 
