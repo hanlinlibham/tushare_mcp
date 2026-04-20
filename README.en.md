@@ -130,9 +130,22 @@ Every tool exits through `finalize_artifact_result` in `findatamcp/utils/artifac
 
 The LLM always sees concise text + guidance — never drowned in rows. The UI and downstream scripts consume `structuredContent.rows`. Both sides read from the same `rows` list, so no drift between preview and full data.
 
-### 2. MCP UI: `ui://` resources + iframe postMessage
+### 2. Four families of resource URIs: UI, large data, entities, derived metrics
 
-`findatamcp/resources/ui_apps.py` registers several `ui://findata/*` resources (`market-dashboard`, `kline-chart`, `moneyflow-chart`, `macro-panel`, `data-table`). Each returns a complete HTML document:
+Beyond tools, findatamcp exposes four classes of MCP resources. Each URI scheme addresses a concrete context-budget problem:
+
+| Scheme | Example | Purpose |
+| :--- | :--- | :--- |
+| `ui://findata/*` | `ui://findata/kline-chart` | HTML + inlined ECharts; the host renders interactive components inside a sandboxed iframe |
+| `data://table/{data_id}` | `data://table/7f3e…` | On-demand fetch of >200-row artifacts so the LLM never has to carry the full table through context |
+| `entity://{stats,search/…,code/…,markets}` | `entity://search/Maotai` | Security entity catalogue (code / name / pinyin / alias / stats), sub-millisecond lookup |
+| `stock://calc_metrics/{calc_id}[/pair/{a}/{b}]` | `stock://calc_metrics/abc/pair/600519.SH/000858.SZ` | Time-series by-products of correlation computations plus derived metrics (volatility, max drawdown, Sharpe, monthly comparison) |
+
+The common principle: **keep the context carrying only pointers and summaries; the actual data body lives in resources, fetched on demand**.
+
+### 3. MCP UI: `ui://` resources + iframe postMessage
+
+`findatamcp/resources/ui_apps.py` registers `ui://findata/*` (`market-dashboard`, `kline-chart`, `moneyflow-chart`, `macro-panel`, `data-table`). Each returns a complete HTML document:
 
 - **Zero CDN dependency** — `static/echarts.min.js` is read into memory at startup and inlined as a `<script>` tag. This satisfies the sandboxed iframe's CSP and works in air-gapped deployments.
 - **Theme forwarding** — the HTML uses `light-dark()` CSS variables; when the host emits `ui/notifications/host-context-changed`, the iframe applies the new palette.
@@ -144,16 +157,26 @@ The LLM always sees concise text + guidance — never drowned in rows. The UI an
 
 A tool only needs to declare the binding via `@mcp.tool(app=AppConfig(ui_uri="ui://findata/kline-chart"))` and the host forwards `structuredContent` to the matching iframe.
 
-### 3. Large-data artifacts: JSONL + column-schema sidecar
+### 4. Large-data context control: threshold dispatch + preview + resource URI
 
-By default (`as_file=False`) rows are embedded directly in `structuredContent.rows`. When the user asks to "export / save" or the LLM plans to call `execute` for further analysis, pass `as_file=True`:
+The core context saver lives in `findatamcp/utils/large_data_handler.py`. Every tool that may return a large table goes through this layer:
 
-1. `data_file_store.store(rows, tool_name, query_params)` (`findatamcp/cache/data_file_store.py`) writes rows to `.jsonl` — date and code columns forced to strings, `NaN → null`.
-2. A column-schema sidecar (`{col: {"type": date|string|number|bool}}`) is dumped alongside, so downstream AG Grid can infer column types without scanning.
-3. Returns a semantic filename (`get_historical_data_000300.SH_20260306_20260402.jsonl`) + `/workspace/<name>` path + `download_urls`.
-4. With `include_ui=False` an extra `meta.ui = None` tells the host to skip rendering — typical when the LLM plans to plot itself with matplotlib and wants to avoid two competing charts.
+- **`THRESHOLD = 200 rows`**. Below the threshold the full table is inlined along with the column schema; above it, the tool immediately switches to "preview + resource" mode.
+- **Top-N preview** (`build_preview_rows`, typically `preview_rows=5`; daily-bar tools can set `mode="tail"` for the most recent rows).
+- **Auto-summary** (`_build_summary`) — scans once: detects date columns to emit `date_range`, for every numeric column emits `{latest, min, max, mean}`. The LLM can answer "max / mean / range" questions without ever reading the full table.
+- **UI equidistant sampling** (`sample_rows`, default `max_points=120`) — long K-line series are down-sampled before rendering, preserving shape while keeping the iframe responsive.
+- **Artifact dump** (`data_file_store.store`, `findatamcp/cache/data_file_store.py`) — writes a `.jsonl` (date/code columns forced to strings, `NaN → null`) plus a `schema` sidecar (`{col: {"type": date|string|number|bool}}`), so downstream AG Grid infers column types directly. 24h TTL with background sweep.
+- **Pointers returned**: `is_truncated=true`, `data_id`, `resource_uri=data://table/{id}`, `download_urls`, `summary`, `preview`, `schema`, `total_rows`. The LLM decides whether to fetch more.
+- **HTTP download routes** (`findatamcp/routes/data_download.py`) — beyond the MCP resource, `GET /data/{id}.jsonl`, `GET /data/{id}.json`, and `GET /data/{id}/info` are mounted for the artifact panel's "download" button.
 
-### 4. LLM behaviour: preventing redundant calls
+A complementary pair of flags at the tool level (`findatamcp/utils/artifact_payload.py`) captures product intent:
+
+- `as_file=True` — force disk dump even for ≤200 rows. Use when the user asks to "save" or when the LLM plans to call `execute` for further analysis.
+- `include_ui=False` — explicitly disable UI (`meta.ui=None`). Use when the LLM will plot itself with matplotlib and wants to avoid two competing charts.
+
+These three paths together — inline under 200, resource above 200, forced file dump — make the LLM's context footprint predictable in every scenario.
+
+### 5. LLM behaviour: preventing redundant calls
 
 UI-rendering tools have a known failure mode: the LLM only reads `content.text` and doesn't realise the iframe has already drawn the chart, so it re-invokes "to check". `findatamcp/utils/ui_hint.py` and `artifact_payload.build_content_trailer` cooperate to pin four guidance lines at the tail of the text:
 
@@ -165,7 +188,7 @@ The user can open it in the artifact panel; you may read it with execute for fur
 
 Tool docstrings also embed `AS_FILE_INCLUDE_UI_DECISION_GUIDE`, exposing the `as_file` / `include_ui` decision table directly to the model. In practice this materially cuts duplicate calls.
 
-### 5. Dependency injection + tool registration
+### 6. Dependency injection + tool registration
 
 `server.py` wires a one-shot DI container at startup:
 
@@ -182,7 +205,7 @@ register_search_tools(mcp, api, db)
 
 Each module's `register_*_tools(mcp, api, [db])` hangs its `@mcp.tool` / `@mcp.resource` / `@mcp.prompt` decorators on the FastMCP instance. Tests can swap `api` for a mock and `db` for an in-memory fixture.
 
-### 6. Cache layering
+### 7. Cache layering
 
 | Layer | Location | Invalidation |
 | :--- | :--- | :--- |
@@ -192,7 +215,7 @@ Each module's `register_*_tools(mcp, api, [db])` hangs its `@mcp.tool` / `@mcp.r
 
 On the async front, Tushare's Python SDK is synchronous, so `TushareAPI` wraps every call in `asyncio.to_thread` — the FastMCP event loop never blocks on network I/O.
 
-### 7. Entity search: EntityStore + pypinyin
+### 8. Entity search: EntityStore + pypinyin
 
 Search tools regularly need to map "baijiu sector", "招商银行", or "平安" to concrete `ts_code` lists. `entity_store.py` loads the full security universe from SQLite into memory at startup:
 

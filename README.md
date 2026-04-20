@@ -130,9 +130,22 @@ findatamcp 的核心是一套**"工具侧生产数据、UI 侧沉浸式消费、
 
 这样 LLM 看到的永远是简短文本 + 引导，不会被大表淹没；UI 和下游脚本通过 `structuredContent.rows` 拿到完整数据；两者出自同一份 `rows`，避免副本漂移。
 
-### 2. MCP UI：ui:// 资源 + iframe postMessage
+### 2. 四族资源 URI：UI、大数据、实体、计算副产物
 
-`findatamcp/resources/ui_apps.py` 注册若干 `ui://findata/*` 资源（`market-dashboard` / `kline-chart` / `moneyflow-chart` / `macro-panel` / `data-table`），返回值是一段完整 HTML：
+除工具外，findatamcp 注册了四类 MCP resource，每一类 URI 解决一个具体的上下文问题：
+
+| Scheme | 示例 | 作用 |
+| :--- | :--- | :--- |
+| `ui://findata/*` | `ui://findata/kline-chart` | HTML + 内联 ECharts，host 在沙箱 iframe 渲染成交互组件 |
+| `data://table/{data_id}` | `data://table/7f3e…` | 超过 200 行的 artifact 按需回读，LLM 不必把整表带进上下文 |
+| `entity://{stats,search/…,code/…,markets}` | `entity://search/贵州茅台` | 证券实体目录（代码 / 名称 / 拼音 / 别名 / 统计），毫秒响应 |
+| `stock://calc_metrics/{calc_id}[/pair/{a}/{b}]` | `stock://calc_metrics/abc/pair/600519.SH/000858.SZ` | 相关性等计算的时间序列副产物和派生指标（波动率、最大回撤、夏普、月度对比）|
+
+四族共用一个原则：**让上下文只携带"指针 + 摘要"，真正的数据体放到资源里按需拉取**。
+
+### 3. MCP UI：ui:// 资源 + iframe postMessage
+
+`findatamcp/resources/ui_apps.py` 注册 `ui://findata/*`（`market-dashboard` / `kline-chart` / `moneyflow-chart` / `macro-panel` / `data-table`），返回值是一段完整 HTML：
 
 - **零 CDN 依赖**：`static/echarts.min.js` 在服务端启动时读进内存，直接内联到 `<script>` 标签，满足沙箱 iframe 的 CSP / 离线部署需求
 - **主题变量透传**：HTML 用 `light-dark()` CSS 变量，host 发 `ui/notifications/host-context-changed` 时同步切换明暗
@@ -144,16 +157,26 @@ findatamcp 的核心是一套**"工具侧生产数据、UI 侧沉浸式消费、
 
 工具端只需在 `@mcp.tool(app=AppConfig(ui_uri="ui://findata/kline-chart"))` 声明绑定关系，host 就会把 `structuredContent` 推给对应 iframe。
 
-### 3. 大数据 artifact：JSONL + 列 schema sidecar
+### 4. 大数据上下文控制：阈值分流 + 预览 + 资源 URI
 
-默认（`as_file=False`）数据直接内嵌 `structuredContent.rows`。当用户要"导出 / 保存"或 LLM 计划调用 `execute` 做二次分析时传 `as_file=True`，流程：
+最核心的上下文省电器在 `findatamcp/utils/large_data_handler.py`，所有会回大表的工具都走这一层：
 
-1. `data_file_store.store(rows, tool_name, query_params)`（`findatamcp/cache/data_file_store.py`）把行写成 `.jsonl`（日期 / 代码列强制字符串化、`NaN → null`）
-2. 同时 dump 一份列 `schema` sidecar（`{col: {"type": date|string|number|bool}}`），供下游 AG Grid 推断列类型
-3. 返回语义化文件名（`get_historical_data_000300.SH_20260306_20260402.jsonl`）+ `/workspace/<name>` 路径 + `download_urls`
-4. `include_ui=False` 时额外把 `meta.ui` 置 None，host 不再渲染 UI —— 典型用法：LLM 要自己用 matplotlib 画图，避免双图混淆
+- **阈值 `THRESHOLD = 200 行`**。低于阈值直接内联整表 + 列 schema；超过阈值立刻切到"预览 + 资源"模式
+- **预览取前 N 行**（`build_preview_rows`，典型 `preview_rows=5`，日线类场景可 `mode="tail"` 取最近若干行）
+- **自动摘要**（`_build_summary`）：扫一遍行，识别日期列输出 `date_range`、对数值列输出 `{latest, min, max, mean}`，让 LLM 在不读整表的前提下就能答"最高价 / 均值 / 时间范围"类问题
+- **UI 等距采样**（`sample_rows`，默认 max_points=120）：K 线类超长序列在渲染前降采样，既保形态又不至于让 iframe 渲染压力爆炸
+- **artifact 落盘**（`data_file_store.store`，`findatamcp/cache/data_file_store.py`）：写一份 `.jsonl`（日期 / 代码列强制字符串化、`NaN → null`）+ 一份 `schema` sidecar（`{col: {"type": date|string|number|bool}}`），供下游 AG Grid 直接推断列类型。24h TTL，后台定时清理
+- **返回指针**：`is_truncated=true` / `data_id` / `resource_uri=data://table/{id}` / `download_urls` / `summary` / `preview` / `schema` / `total_rows`。LLM 看到这一组指针即可决定是否进一步拉取
+- **HTTP 下载路由**（`findatamcp/routes/data_download.py`）：除了 MCP resource，还挂了 `GET /data/{id}.jsonl`、`GET /data/{id}.json`、`GET /data/{id}/info`，前端 artifact 面板点击"下载"走这里
 
-### 4. LLM 行为约束：防重复调用
+工具侧另有一对开关更贴近产品语义（`findatamcp/utils/artifact_payload.py`）：
+
+- `as_file=True` —— 即便 ≤ 200 行也强制落盘。用户说"保存"、LLM 要调 `execute` 做二次分析时用
+- `include_ui=False` —— 显式关闭 UI（`meta.ui=None`）。LLM 要自己 matplotlib 画图时避免双图混淆
+
+三条路径结合起来，200 行以下走内联、200 行以上走资源、强制落盘走文件路径 —— LLM 的上下文占用在任何场景下都可预测。
+
+### 5. LLM 行为约束：防重复调用
 
 UI 渲染型工具有个老问题：LLM 只能看到 `content.text`，不知道 iframe 已经出图，很容易"再调一次看看"。`findatamcp/utils/ui_hint.py` 和 `artifact_payload.build_content_trailer` 联手在 text 尾部写死 4 行提示：
 
@@ -165,7 +188,7 @@ UI 已同步渲染（ui://findata/kline-chart）。
 
 同时 tool docstring 里塞入 `AS_FILE_INCLUDE_UI_DECISION_GUIDE`，把 `as_file` / `include_ui` 的决策表直接曝露给 LLM。实测重复调用率显著下降。
 
-### 5. 依赖注入 + 工具注册
+### 6. 依赖注入 + 工具注册
 
 `server.py` 在启动时装配一次性 DI 容器：
 
@@ -182,7 +205,7 @@ register_search_tools(mcp, api, db)
 
 每个模块的 `register_*_tools(mcp, api, [db])` 负责把 `@mcp.tool` / `@mcp.resource` / `@mcp.prompt` 挂到 FastMCP 实例。测试里可以替换 `api` 为 mock，`db` 为内存 fixture。
 
-### 6. 缓存分层
+### 7. 缓存分层
 
 | 层 | 位置 | 失效策略 |
 | :--- | :--- | :--- |
@@ -192,7 +215,7 @@ register_search_tools(mcp, api, db)
 
 异步层面，Tushare Python SDK 是同步的，`TushareAPI` 统一用 `asyncio.to_thread` 包装，保证 FastMCP 的事件循环不被阻塞。
 
-### 7. 实体检索：EntityStore + pypinyin
+### 8. 实体检索：EntityStore + pypinyin
 
 搜索类工具常需把 "白酒行业"、"招商银行"、"平安" 映射到代码列表。`entity_store.py` 在启动时把 SQLite 里的全量证券实体装进内存：
 
