@@ -151,7 +151,7 @@ findatamcp/
 │       └── errors.py
 ├── tests/                  # pytest suite
 ├── docs/                   # docs (including screenshots)
-├── static/                 # frontend assets (AG Charts / ECharts, bundled locally)
+├── static/                 # frontend assets (ECharts, bundled locally)
 ├── pm2.config.js           # PM2 deployment config
 ├── start.sh / stop.sh      # PM2 lifecycle
 ├── start_sse.sh            # SSE foreground launcher
