@@ -2,7 +2,9 @@
 
 > 中文版 · [English](README.en.md)
 
-基于 MCP (Model Context Protocol) 的金融数据服务器，面向 LLM Agent 提供 A 股行情、财务、指数、基金、宏观等结构化数据访问能力，并将工具调用结果自动渲染为可交互的前端 UI。底层数据源为 Tushare Pro。
+**一次调用，数据 + 图表同时到位。**
+
+**findatamcp** 让 LLM Agent 在一次工具调用里同时拿到"给模型看的结构化数据"和"给用户看的交互式图表"。服务端覆盖 42 个金融数据工具（A 股行情、财务三表、指数基金、宏观指标），通过 MCP Apps 规范把结果渲染成可缩放的 K 线、涨跌家数仪表板、资金流折线——数据只取一次，模型不用重复调用，用户直接在 artifact 面板里操作。底层数据源为 Tushare Pro。
 
 原名 `tushare_mcp`，重构后更名为 `findatamcp`，采用模块化包结构。
 

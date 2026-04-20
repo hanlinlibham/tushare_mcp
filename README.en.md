@@ -2,7 +2,9 @@
 
 > English · [中文](README.md)
 
-An MCP (Model Context Protocol) server for financial data, exposing A-share quotes, financials, indices, funds, and macro indicators to LLM agents — and rendering tool results as interactive UI components via the MCP Apps spec. Backed by Tushare Pro.
+**One call. Data for the model. UI for the human.**
+
+**findatamcp** lets LLM agents pull both *structured data for the model* and *an interactive chart for the user* in a single tool call. It ships 42 financial-data tools (A-share quotes, financial statements, funds, macro) and renders results as live UI — zoomable K-lines, market breadth dashboards, money-flow lines — via the MCP Apps spec. One fetch, no re-invocations, users interact directly in the artifact panel. Backed by Tushare Pro.
 
 Formerly `tushare_mcp`; renamed to `findatamcp` after a modular refactor.
 
