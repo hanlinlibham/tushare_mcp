@@ -1,0 +1,36 @@
+.git
+.gitignore
+.github
+.claude
+.vscode
+.idea
+
+# Local env / logs / caches
+.env
+*.log
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/
+
+# Tests & dev-only assets (keep image slim)
+tests/
+docs/
+legacy/
+
+# Repo docs — not needed at runtime
+README*.md
+CHANGELOG.md
+CONTRIBUTING.md
+
+# Local backups / scratch
+*.bak
+*.bak.*
+patch_*.py
+
+# OS
+.DS_Store
+Thumbs.db

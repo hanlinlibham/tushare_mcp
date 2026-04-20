@@ -47,11 +47,26 @@ pip install -r requirements.txt
 cp .env.example .env
 # 编辑 .env，填入 TUSHARE_TOKEN
 
-# 运行（三选一）
+# 运行（四选一）
 python -m findatamcp.server              # Streamable HTTP，推荐
 python -m findatamcp.server_sse          # SSE，配合 Claude Desktop 等
 ./start.sh                               # PM2 守护
+docker compose up -d                     # Docker 部署（见下文）
 ```
+
+### Docker
+
+```bash
+export TUSHARE_TOKEN=your_token
+docker compose up -d
+# 端点：http://127.0.0.1:8006
+# 日志：docker logs -f findatamcp
+# artifact 文件持久化在命名卷 findatamcp-data（挂载到容器内 /data）
+```
+
+默认走 Streamable HTTP。需要 SSE 时在 `docker-compose.yml` 里打开 `command: ["python", "-m", "findatamcp.server_sse"]` 注释行。镜像仅基于 `python:3.12-slim`，构建产物约 400 MB 左右。
+
+> ⚠️ `Dockerfile` 和 `docker-compose.yml` 已提供但**未经完整 CI 验证**，首次使用请自行 `docker compose build` + `docker compose up` 跑通后再投生产。
 
 ### PM2 环境变量
 
@@ -178,6 +193,28 @@ findatamcp/
 ---
 
 ## 实现路径
+
+### 总览
+
+```mermaid
+flowchart LR
+    Agent["LLM Agent"] -->|"@mcp.tool call"| Tool["Tool handler"]
+    Tool --> Envelope["artifact_payload.<br/>finalize_artifact_result"]
+    Envelope --> TR["ToolResult"]
+
+    TR --> Content["content[0].text<br/>markdown preview + trailer"]
+    TR --> Struct["structuredContent<br/>rows / columns / schema"]
+    TR --> Meta["meta.ui<br/>= ui://findata/*"]
+
+    Struct -->|"rows ≤ 200"| Inline["inline full rows"]
+    Struct -->|"rows &gt; 200"| Store["data_file_store<br/>.jsonl + schema sidecar"]
+    Store --> DataURI["data://table/{id}"]
+    Store --> HTTP["GET /data/{id}.jsonl"]
+
+    Content --> LLM["LLM reads summary,<br/>decides next step"]
+    Meta --> IFrame["sandboxed iframe<br/>ECharts render"]
+    DataURI --> Next["subsequent step:<br/>resources/read · execute"]
+```
 
 ### 核心假设：LLM Agent 在金融数据场景下的两种崩溃方式
 

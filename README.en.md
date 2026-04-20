@@ -51,7 +51,22 @@ cp .env.example .env
 python -m findatamcp.server              # Streamable HTTP (recommended)
 python -m findatamcp.server_sse          # SSE, for Claude Desktop et al.
 ./start.sh                               # PM2 daemon
+docker compose up -d                     # Docker (see below)
 ```
+
+### Docker
+
+```bash
+export TUSHARE_TOKEN=your_token
+docker compose up -d
+# endpoint: http://127.0.0.1:8006
+# logs:     docker logs -f findatamcp
+# artifacts persist in the named volume findatamcp-data (mounted at /data)
+```
+
+Streamable HTTP is the default transport. For SSE, uncomment the `command: ["python", "-m", "findatamcp.server_sse"]` line in `docker-compose.yml`. The image is based on `python:3.12-slim`; the built image is ~400 MB.
+
+> ⚠️ `Dockerfile` and `docker-compose.yml` are provided but **not yet CI-validated**. On first use, run `docker compose build && docker compose up` locally to confirm before rolling to production.
 
 ### PM2 environment variables
 
@@ -178,6 +193,28 @@ A daily-report workflow chains `get_macro_monthly_indicator` (GDP / CPI / PMI / 
 ---
 
 ## Implementation path
+
+### Overview
+
+```mermaid
+flowchart LR
+    Agent["LLM Agent"] -->|"@mcp.tool call"| Tool["Tool handler"]
+    Tool --> Envelope["artifact_payload.<br/>finalize_artifact_result"]
+    Envelope --> TR["ToolResult"]
+
+    TR --> Content["content[0].text<br/>markdown preview + trailer"]
+    TR --> Struct["structuredContent<br/>rows / columns / schema"]
+    TR --> Meta["meta.ui<br/>= ui://findata/*"]
+
+    Struct -->|"rows ≤ 200"| Inline["inline full rows"]
+    Struct -->|"rows &gt; 200"| Store["data_file_store<br/>.jsonl + schema sidecar"]
+    Store --> DataURI["data://table/{id}"]
+    Store --> HTTP["GET /data/{id}.jsonl"]
+
+    Content --> LLM["LLM reads summary,<br/>decides next step"]
+    Meta --> IFrame["sandboxed iframe<br/>ECharts render"]
+    DataURI --> Next["subsequent step:<br/>resources/read · execute"]
+```
 
 ### Design assumptions: two ways LLM agents collapse on financial-data workloads
 

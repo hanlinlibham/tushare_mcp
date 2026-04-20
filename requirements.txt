@@ -1,21 +1,23 @@
-# Tushare MCP Server Dependencies
+# findatamcp dependencies
 
-# MCP Framework
+# MCP framework
 fastmcp>=2.13.0
 
-# Web Server
+# Web server
 uvicorn>=0.30.0
 
-# HTTP Client
+# HTTP client
 httpx>=0.27.0
 
-# Financial Data
+# Financial data
 tushare>=1.4.0
 
-# Data Processing
+# Data processing
 pandas>=2.0.0
 numpy>=1.24.0
 
-# Optional: Environment Variables
-python-dotenv>=1.0.0
+# Chinese entity search (pinyin index)
+pypinyin>=0.50.0
 
+# Environment variables
+python-dotenv>=1.0.0
