@@ -151,7 +151,7 @@ findatamcp/
 │       └── errors.py
 ├── tests/                  # pytest 测试
 ├── docs/                   # 文档（含截图）
-├── static/                 # 前端资源（AG Charts / ECharts，本地打包）
+├── static/                 # 前端资源（ECharts，本地打包）
 ├── pm2.config.js           # PM2 部署配置
 ├── start.sh / stop.sh      # PM2 生命周期
 ├── start_sse.sh            # SSE 前台启动
